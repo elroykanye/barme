@@ -167,7 +167,12 @@ fn print_banner(config: &barme_config::Config, ui: bool) {
     println!();
 }
 
-#[tokio::main]
+// A generous worker count on purpose: request handlers call the engine's
+// synchronous, filesystem-backed methods directly, so a burst of concurrent
+// requests parks several workers in blocking I/O at once. With too few threads
+// the accept loop itself stops being polled and every connection hangs after
+// the TCP handshake. Sixteen leaves headroom for that burst on any platform.
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clap::Parser;
     let cli = Cli::parse();
@@ -258,17 +263,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let interval_secs = config.gc_interval_secs.max(1);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // The first tick is immediate; consume it so we don't sweep the whole
+            // data directory the instant we start serving requests.
+            ticker.tick().await;
             loop {
                 ticker.tick().await;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if let Err(e) = engine.enforce_lifecycle(now) {
-                    tracing::warn!("lifecycle pass failed: {e}");
-                }
-                match engine.gc_sweep(now, grace) {
-                    Ok(s) if s.condemned > 0 || s.erased > 0 => {
+                let engine = engine.clone();
+                // enforce_lifecycle and gc_sweep are synchronous filesystem walks.
+                // Run them on the blocking pool so they never sit on an async
+                // worker thread and starve the request handlers.
+                let outcome = tokio::task::spawn_blocking(move || {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if let Err(e) = engine.enforce_lifecycle(now) {
+                        tracing::warn!("lifecycle pass failed: {e}");
+                    }
+                    engine.gc_sweep(now, grace)
+                })
+                .await;
+                match outcome {
+                    Ok(Ok(s)) if s.condemned > 0 || s.erased > 0 => {
                         tracing::info!(
                             "gc: {} condemned, {} erased, {} live",
                             s.condemned,
@@ -276,8 +292,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             s.live
                         );
                     }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("gc sweep failed: {e}"),
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => tracing::warn!("gc sweep failed: {e}"),
+                    Err(e) => tracing::warn!("gc task failed: {e}"),
                 }
             }
         });
