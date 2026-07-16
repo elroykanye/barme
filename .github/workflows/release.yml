@@ -50,30 +50,27 @@ jobs:
           body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
 
-  # Build the Docker image once and publish it to GitHub's container registry,
-  # tagged with the version and `latest`.
+  # Build the Docker image once and publish it to Docker Hub, tagged with the
+  # version and `latest`. Needs two repo secrets: DOCKERHUB_USERNAME and
+  # DOCKERHUB_TOKEN (a Docker Hub access token).
   docker:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/barme
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest

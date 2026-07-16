@@ -39,7 +39,7 @@ Console on `http://localhost:7374`, API on `:7373` (docs at `:7373/docs`), S3 on
 ## Docker
 
 ```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data ghcr.io/elroykanye/barme:0.1.0
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.1.0
 ```
 
 A static musl binary on Alpine with CA roots only. Build it yourself with `docker build -t barme .` if you'd rather.
