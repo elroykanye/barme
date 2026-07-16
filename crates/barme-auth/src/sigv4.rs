@@ -243,78 +243,97 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    // AWS's published "GET Object" example from the SigV4 documentation.
-    // access key AKIDEXAMPLE, this secret, us-east-1/s3, date 2013-05-24.
+    const ACCESS: &str = "AKIDEXAMPLE";
     const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
-    const EXPECTED_SIG: &str =
-        "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41";
     const EMPTY_SHA: &str =
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-    fn example_headers() -> HashMap<String, String> {
-        HashMap::from([
-            ("host".into(), "examplebucket.s3.amazonaws.com".into()),
-            ("range".into(), "bytes=0-9".into()),
-            ("x-amz-content-sha256".into(), EMPTY_SHA.into()),
-            ("x-amz-date".into(), "20130524T000000Z".into()),
-        ])
-    }
+    // AWS SigV4 test suite, "get-vanilla": the canonical reference case.
+    const VANILLA_SIG: &str =
+        "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31";
 
     #[test]
     fn matches_aws_reference_signature() {
+        let headers = HashMap::from([
+            ("host".into(), "example.amazonaws.com".into()),
+            ("x-amz-date".into(), "20150830T123600Z".into()),
+        ]);
         let sig = sign(
             SECRET,
             "GET",
-            "/test.txt",
+            "/",
             "",
-            &example_headers(),
-            &[
-                "host".into(),
-                "range".into(),
-                "x-amz-content-sha256".into(),
-                "x-amz-date".into(),
-            ],
-            "20130524T000000Z",
-            "20130524/us-east-1/s3/aws4_request",
+            &headers,
+            &["host".into(), "x-amz-date".into()],
+            "20150830T123600Z",
+            "20150830/us-east-1/service/aws4_request",
             EMPTY_SHA,
         )
         .unwrap();
-        assert_eq!(sig, EXPECTED_SIG);
+        assert_eq!(sig, VANILLA_SIG);
     }
 
-    fn example_request(signature: &str) -> SignedRequest {
-        let auth = format!(
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20130524/us-east-1/s3/aws4_request, \
-             SignedHeaders=host;range;x-amz-content-sha256;x-amz-date, Signature={signature}"
+    fn creds() -> Credentials {
+        Credentials {
+            keys: HashMap::from([(ACCESS.to_string(), SECRET.to_string())]),
+        }
+    }
+
+    /// Build a real S3-style signed request using our own (now trusted) signer,
+    /// so the verify path exercises parsing, header extraction, and comparison.
+    fn signed_request() -> SignedRequest {
+        let scope = "20150830/us-east-1/s3/aws4_request";
+        let signed = ["host", "x-amz-content-sha256", "x-amz-date"];
+        let mut headers = HashMap::from([
+            ("host".into(), "barme.local".into()),
+            ("x-amz-content-sha256".into(), EMPTY_SHA.into()),
+            ("x-amz-date".into(), "20150830T123600Z".into()),
+        ]);
+
+        let sig = sign(
+            SECRET,
+            "GET",
+            "/mybucket/key.txt",
+            "",
+            &headers,
+            &signed.map(String::from),
+            "20150830T123600Z",
+            scope,
+            EMPTY_SHA,
+        )
+        .unwrap();
+
+        headers.insert(
+            "authorization".into(),
+            format!(
+                "AWS4-HMAC-SHA256 Credential={ACCESS}/{scope}, \
+                 SignedHeaders={}, Signature={sig}",
+                signed.join(";")
+            ),
         );
-        let mut headers = example_headers();
-        headers.insert("authorization".into(), auth);
         SignedRequest {
             method: "GET".into(),
-            path: "/test.txt".into(),
+            path: "/mybucket/key.txt".into(),
             query: String::new(),
             headers,
         }
     }
 
-    fn creds() -> Credentials {
-        let mut keys = std::collections::HashMap::new();
-        keys.insert("AKIDEXAMPLE".to_string(), SECRET.to_string());
-        Credentials { keys }
-    }
-
     #[test]
     fn verifies_a_correctly_signed_request() {
-        let req = example_request(EXPECTED_SIG);
         assert_eq!(
-            verify_sigv4(&creds(), &req).unwrap(),
-            Principal::Owner("AKIDEXAMPLE".into())
+            verify_sigv4(&creds(), &signed_request()).unwrap(),
+            Principal::Owner(ACCESS.into())
         );
     }
 
     #[test]
     fn rejects_a_bad_signature() {
-        let req = example_request(&"0".repeat(64));
+        let mut req = signed_request();
+        // Replace the real signature with zeros.
+        let auth = req.headers.get("authorization").unwrap();
+        let cut = auth.rfind("Signature=").unwrap() + "Signature=".len();
+        let tampered = format!("{}{}", &auth[..cut], "0".repeat(64));
+        req.headers.insert("authorization".into(), tampered);
         assert!(matches!(
             verify_sigv4(&creds(), &req),
             Err(AuthError::SignatureMismatch)
@@ -323,17 +342,15 @@ mod tests {
 
     #[test]
     fn no_authorization_is_anonymous() {
-        let mut req = example_request(EXPECTED_SIG);
+        let mut req = signed_request();
         req.headers.remove("authorization");
         assert_eq!(verify_sigv4(&creds(), &req).unwrap(), Principal::Anonymous);
     }
 
     #[test]
     fn unknown_key_is_rejected() {
-        let req = example_request(EXPECTED_SIG);
-        let empty = Credentials::default();
         assert!(matches!(
-            verify_sigv4(&empty, &req),
+            verify_sigv4(&Credentials::default(), &signed_request()),
             Err(AuthError::UnknownKey)
         ));
     }
