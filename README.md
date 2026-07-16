@@ -13,6 +13,19 @@ Storing things this way gives you a few properties without extra machinery:
 - **Integrity by default** — reads are verified against their hash, so a corrupted byte is caught on access instead of surfacing later.
 - **Efficient sync** — two nodes reconcile by comparing tree roots and transferring only the branches that differ.
 
+## Quickstart
+
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
+      -v barme:/data elroykanye/barme:0.1.0
+
+Console on http://localhost:7374, login `barme` / `barme`. Then store something:
+
+    curl -u barme:barme -T photo.jpg http://localhost:7373/objects/photos/cat.jpg
+    curl -u barme:barme http://localhost:7373/objects/photos/cat.jpg -o out.jpg
+
+Or grab a binary from the [releases](https://github.com/elroykanye/barme/releases).
+Full walkthrough in [docs/USAGE.md](docs/USAGE.md).
+
 ## Features
 
 - S3-compatible API for existing tools and SDKs
@@ -28,7 +41,7 @@ Every object carries a manifest, a small record of how it was stored: chunk list
 
 The store exposes two front ends over one engine:
 
-- **S3 API** — buckets, keys, versions, multipart. For compatibility.
+- **S3 API** — object get, put, delete, and head with SigV4. For compatibility.
 - **Native API** — version diffs, fetch-by-hash, tree-based sync, fidelity introspection, and semantic search.
 
 Both call the same engine, so an object written over S3 can be inspected and diffed through the native API.
@@ -72,20 +85,23 @@ output into the binary, so a release build is a single self-contained executable
 
     cargo build --release -p barmed --features ui
 
-Credentials are optional. Set `BARME_ACCESS_KEY` and `BARME_SECRET_KEY` to
-enforce auth (SigV4 on the S3 door, Basic on the native door); leave them unset
-to run open. Set `BARME_EMBED_URL` to enable semantic search.
+Auth is on by default with the credential `barme` / `barme` (SigV4 on the S3
+door, Basic on the native door). Override it with `BARME_ACCESS_KEY` and
+`BARME_SECRET_KEY`, or in `barme.toml`. Set `BARME_EMBED_URL` to enable semantic
+search. Config, ports, and the full API are covered in
+[`docs/USAGE.md`](docs/USAGE.md).
 
 ## Documentation
 
-Full design notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+- [`docs/USAGE.md`](docs/USAGE.md) — getting started, API, config, sync.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design and on-disk layout.
 
 ## Status
 
-Alpha (v0.1.0). It works end to end and is fun to run, but it's early: large
-uploads are buffered in memory (no streaming multipart yet), key secrets are
-stored in the clear (AWS-style), and with no keys configured it runs open. Don't
-put anything you can't lose in it yet.
+Alpha (v0.1.0). It works end to end, but it's early: large uploads are buffered
+in memory (no streaming multipart yet), key secrets are stored in the clear
+(AWS-style), and it ships with a default `barme` / `barme` login you should
+change. Don't put anything you can't lose in it yet.
 
 ## License
 
