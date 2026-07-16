@@ -154,15 +154,18 @@ name = "barme-native"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "barme-auth",
  "barme-core",
  "barme-engine",
  "barme-semantic",
+ "base64",
  "http-body-util",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
+ "tower-http",
 ]
 
 [[package]]

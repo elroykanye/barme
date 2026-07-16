@@ -1,13 +1,11 @@
-//! Native front door: the operations S3 has no vocabulary for.
+//! Native front door. Two jobs: the operations S3 can't express (version
+//! history, fetch-by-hash, sync, search), and a browser-friendly app API for a
+//! frontend, so a React app can do everything over JSON + Basic auth without
+//! signing SigV4 requests.
 //!
-//!   GET  /history/{bucket}/{*key}   version graph, oldest first
-//!   GET  /manifest/{bucket}/{*key}  how the current version was stored
-//!   GET  /content/{hash}            fetch any object directly by its id
-//!   POST /search                    semantic retrieval (if configured)
-//!   POST /sync                      tree reconciliation (not yet)
-//!
-//! Runs on its own port beside the S3 door, over the same engine. Paths put the
-//! fixed segment first so a wildcard key can't swallow the `/history` suffix.
+//! Auth: Basic (access:secret). With no credentials configured the door runs
+//! open. Reads obey bucket visibility; writes, deletes, listing, search, and
+//! fetch-by-hash require the owner. CORS is permissive so a browser can call in.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,27 +15,29 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
-use barme_core::Hash;
+use barme_auth::{authorize, Action, Credentials, Principal};
+use barme_core::{BucketConfig, Hash};
 use barme_engine::{Engine, EngineError};
-use barme_semantic::{Semantic, SemanticError};
-use serde::Deserialize;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
+use tower_http::cors::CorsLayer;
 
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
-/// Shared handler state. Semantic is optional: without it, `/search` reports
-/// that it isn't configured rather than failing.
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<Engine>,
-    pub semantic: Option<Arc<Semantic>>,
+    pub semantic: Option<Arc<barme_semantic::Semantic>>,
+    pub creds: Option<Arc<Credentials>>,
 }
 
 enum NativeError {
     Engine(EngineError),
-    Semantic(SemanticError),
+    Semantic(barme_semantic::SemanticError),
+    Forbidden,
 }
 
 impl From<EngineError> for NativeError {
@@ -45,58 +45,228 @@ impl From<EngineError> for NativeError {
         NativeError::Engine(e)
     }
 }
-
-impl From<SemanticError> for NativeError {
-    fn from(e: SemanticError) -> Self {
+impl From<barme_semantic::SemanticError> for NativeError {
+    fn from(e: barme_semantic::SemanticError) -> Self {
         NativeError::Semantic(e)
     }
 }
 
 impl IntoResponse for NativeError {
     fn into_response(self) -> Response {
-        let msg = match self {
-            NativeError::Engine(e) => e.to_string(),
-            NativeError::Semantic(e) => e.to_string(),
-        };
-        (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+        match self {
+            NativeError::Engine(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
+            NativeError::Semantic(e) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+            }
+            NativeError::Forbidden => {
+                (StatusCode::FORBIDDEN, "access denied").into_response()
+            }
+        }
     }
 }
 
-/// Router without a semantic layer wired. `/search` will report unconfigured.
-pub fn app(engine: Arc<Engine>) -> Router {
-    router(AppState {
-        engine,
-        semantic: None,
-    })
-}
-
-/// Router with semantic search enabled.
-pub fn app_with_semantic(engine: Arc<Engine>, semantic: Arc<Semantic>) -> Router {
-    router(AppState {
-        engine,
-        semantic: Some(semantic),
-    })
-}
-
-fn router(state: AppState) -> Router {
+pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/buckets", get(list_buckets))
+        .route("/buckets/{bucket}/visibility", post(set_visibility))
+        .route("/buckets/{bucket}/objects", get(list_objects))
+        .route("/objects/{bucket}/{*key}", get(download).put(upload).delete(remove))
         .route("/history/{bucket}/{*key}", get(history))
         .route("/manifest/{bucket}/{*key}", get(manifest))
         .route("/content/{hash}", get(content))
         .route("/search", post(search))
         .route("/sync", post(not_yet))
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
 pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(state)).await
+    axum::serve(listener, app(state)).await
 }
+
+// ---- auth helpers --------------------------------------------------------
+
+/// Resolve who is calling from a Basic Authorization header. With no
+/// credentials configured, every caller is the owner (open mode).
+fn principal(state: &AppState, headers: &HeaderMap) -> Principal {
+    let Some(creds) = &state.creds else {
+        return Principal::Owner("open".into());
+    };
+    let Some(raw) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Basic "))
+        .and_then(|b64| STANDARD.decode(b64.trim()).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+    else {
+        return Principal::Anonymous;
+    };
+    let Some((access, secret)) = raw.split_once(':') else {
+        return Principal::Anonymous;
+    };
+    match creds.secret(access) {
+        Some(known) if known == secret => Principal::Owner(access.to_string()),
+        _ => Principal::Anonymous,
+    }
+}
+
+/// Owner-only gate.
+fn require_owner(p: &Principal) -> Result<(), NativeError> {
+    if p.is_owner() {
+        Ok(())
+    } else {
+        Err(NativeError::Forbidden)
+    }
+}
+
+/// Read gate that respects bucket visibility.
+fn require_read(state: &AppState, p: &Principal, bucket: &str) -> Result<(), NativeError> {
+    let public = state.engine.is_public(bucket).unwrap_or(false);
+    if authorize(p, Action::Read, public) {
+        Ok(())
+    } else {
+        Err(NativeError::Forbidden)
+    }
+}
+
+// ---- bucket + object listing --------------------------------------------
+
+#[derive(Serialize)]
+struct BucketInfo {
+    name: String,
+    public_read: bool,
+    objects: usize,
+}
+
+async fn list_buckets(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    let mut out = Vec::new();
+    for name in st.engine.buckets()? {
+        out.push(BucketInfo {
+            public_read: st.engine.is_public(&name)?,
+            objects: st.engine.keys(&name)?.len(),
+            name,
+        });
+    }
+    Ok(Json(out).into_response())
+}
+
+#[derive(Serialize)]
+struct ObjectInfo {
+    key: String,
+    size: u64,
+    versions: usize,
+}
+
+async fn list_objects(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_read(&st, &principal(&st, &headers), &bucket)?;
+    let mut out = Vec::new();
+    for key in st.engine.keys(&bucket)? {
+        let size = st
+            .engine
+            .manifest(&bucket, &key)?
+            .map(|m| m.original.size_bytes)
+            .unwrap_or(0);
+        out.push(ObjectInfo {
+            versions: st.engine.history(&bucket, &key)?.len(),
+            key,
+            size,
+        });
+    }
+    Ok(Json(out).into_response())
+}
+
+#[derive(Deserialize)]
+struct Visibility {
+    public_read: bool,
+}
+
+async fn set_visibility(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(vis): Json<Visibility>,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    st.engine.set_bucket_config(
+        &bucket,
+        &BucketConfig {
+            public_read: vis.public_read,
+        },
+    )?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---- object CRUD ---------------------------------------------------------
+
+#[derive(Serialize)]
+struct Uploaded {
+    object_id: String,
+}
+
+async fn upload(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(DEFAULT_CONTENT_TYPE);
+    let object_id = st.engine.put(&bucket, &key, &body, content_type)?;
+    Ok(Json(Uploaded {
+        object_id: object_id.to_string(),
+    })
+    .into_response())
+}
+
+async fn download(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_read(&st, &principal(&st, &headers), &bucket)?;
+    let Some(bytes) = st.engine.get(&bucket, &key)? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let content_type = st
+        .engine
+        .manifest(&bucket, &key)?
+        .map(|m| m.original.content_type)
+        .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
+    Ok(with_bytes(&content_type, bytes))
+}
+
+async fn remove(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    st.engine.delete(&bucket, &key)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---- introspection -------------------------------------------------------
 
 async fn history(
     State(st): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, NativeError> {
+    require_read(&st, &principal(&st, &headers), &bucket)?;
     let ids: Vec<String> = st
         .engine
         .history(&bucket, &key)?
@@ -109,7 +279,9 @@ async fn history(
 async fn manifest(
     State(st): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Result<Response, NativeError> {
+    require_read(&st, &principal(&st, &headers), &bucket)?;
     match st.engine.manifest(&bucket, &key)? {
         Some(m) => Ok(Json(m).into_response()),
         None => Ok(StatusCode::NOT_FOUND.into_response()),
@@ -119,31 +291,18 @@ async fn manifest(
 async fn content(
     State(st): State<AppState>,
     Path(hash): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, NativeError> {
+    // Fetch-by-hash isn't bucket-scoped, so it's owner-only.
+    require_owner(&principal(&st, &headers))?;
     let Ok(object_id) = hash.parse::<Hash>() else {
         return Ok((StatusCode::BAD_REQUEST, "malformed content hash").into_response());
     };
-    let Some(manifest) = st.engine.object_manifest(&object_id)? else {
+    let Some(m) = st.engine.object_manifest(&object_id)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-
     let bytes = st.engine.read_object(&object_id)?;
-    let mut out = HeaderMap::new();
-    out.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&manifest.original.content_type)
-            .unwrap_or(HeaderValue::from_static(DEFAULT_CONTENT_TYPE)),
-    );
-    out.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
-    Ok((StatusCode::OK, out, bytes).into_response())
-}
-
-fn default_k() -> usize {
-    10
-}
-
-fn default_tenant() -> String {
-    "default".to_string()
+    Ok(with_bytes(&m.original.content_type, bytes))
 }
 
 #[derive(Deserialize)]
@@ -155,16 +314,25 @@ struct SearchRequest {
     tenant: String,
 }
 
-/// Embed the query text and return the nearest objects. The semantic check runs
-/// before the body is parsed so an unconfigured instance answers 501 cleanly.
-async fn search(State(st): State<AppState>, body: Bytes) -> Result<Response, NativeError> {
+fn default_k() -> usize {
+    10
+}
+fn default_tenant() -> String {
+    "default".to_string()
+}
+
+async fn search(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
     let Some(semantic) = &st.semantic else {
         return Ok((StatusCode::NOT_IMPLEMENTED, "semantic search not configured").into_response());
     };
     let Ok(req) = serde_json::from_slice::<SearchRequest>(&body) else {
         return Ok((StatusCode::BAD_REQUEST, "expected {query, k?, tenant?}").into_response());
     };
-
     let hits = semantic
         .search(&req.tenant, req.query.as_bytes(), "text/plain", req.k)
         .await?;
@@ -179,6 +347,16 @@ async fn not_yet(_body: Bytes) -> Response {
     (StatusCode::NOT_IMPLEMENTED, "not implemented yet").into_response()
 }
 
+fn with_bytes(content_type: &str, bytes: Vec<u8>) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(content_type).unwrap_or(HeaderValue::from_static(DEFAULT_CONTENT_TYPE)),
+    );
+    out.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+    (StatusCode::OK, out, bytes).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,89 +366,118 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn engine() -> Arc<Engine> {
+    fn state() -> AppState {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.keep();
-        Arc::new(Engine::open(path, Policy::default()).unwrap())
-    }
-
-    async fn get(app: Router, uri: &str) -> Response {
-        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn history_lists_versions_oldest_first() {
-        let e = engine();
-        let id1 = e.put("b", "k", b"v1", "text/plain").unwrap();
-        let id2 = e.put("b", "k", b"v2 is different", "text/plain").unwrap();
-
-        let res = get(app(e), "/history/b/k").await;
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = res.into_body().collect().await.unwrap().to_bytes();
-        let ids: Vec<String> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(ids, vec![id1.to_string(), id2.to_string()]);
-    }
-
-    #[tokio::test]
-    async fn manifest_reports_codec_then_404() {
-        let e = engine();
-        e.put("b", "k", b"hello", "text/plain").unwrap();
-
-        let res = get(app(e.clone()), "/manifest/b/k").await;
-        assert_eq!(res.status(), StatusCode::OK);
-        let body = res.into_body().collect().await.unwrap().to_bytes();
-        let m: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(m["storage"]["codec"], "zstd");
-
-        assert_eq!(
-            get(app(e), "/manifest/b/ghost").await.status(),
-            StatusCode::NOT_FOUND
-        );
-    }
-
-    #[tokio::test]
-    async fn content_fetches_by_hash() {
-        let e = engine();
-        let id = e.put("b", "k", b"addressed by content", "text/plain").unwrap();
-
-        let res = get(app(e), &format!("/content/{id}")).await;
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "text/plain");
-        let body = res.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"addressed by content");
-    }
-
-    #[tokio::test]
-    async fn unknown_content_hash_is_404_and_junk_is_400() {
-        let e = engine();
-        let missing = Hash::of(b"never stored");
-        assert_eq!(
-            get(app(e.clone()), &format!("/content/{missing}")).await.status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            get(app(e), "/content/not-a-hash").await.status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
-
-    #[tokio::test]
-    async fn search_without_semantic_is_501() {
-        let e = engine();
-        for path in ["/sync", "/search"] {
-            let res = app(e.clone())
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);
+        AppState {
+            engine: Arc::new(Engine::open(path, Policy::default()).unwrap()),
+            semantic: None,
+            creds: None,
         }
+    }
+
+    /// State with one owner credential, so auth is actually enforced.
+    fn state_with_auth() -> (AppState, String) {
+        let mut s = state();
+        s.creds = Some(Arc::new(Credentials::single("owner", "secret")));
+        let basic = format!("Basic {}", STANDARD.encode("owner:secret"));
+        (s, basic)
+    }
+
+    async fn send(app: Router, req: Request<Body>) -> Response {
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn open_mode_allows_everything() {
+        let st = state();
+        st.engine.put("b", "k", b"hi", "text/plain").unwrap();
+        let res = send(
+            app(st),
+            Request::builder().uri("/buckets").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn owner_only_endpoint_rejects_anonymous() {
+        let (st, _basic) = state_with_auth();
+        let res = send(
+            app(st),
+            Request::builder().uri("/buckets").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn owner_credential_is_accepted() {
+        let (st, basic) = state_with_auth();
+        let res = send(
+            app(st),
+            Request::builder()
+                .uri("/buckets")
+                .header(header::AUTHORIZATION, basic)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn public_bucket_reads_without_auth() {
+        let (st, _basic) = state_with_auth();
+        st.engine.put("open", "k", b"hi", "text/plain").unwrap();
+        st.engine
+            .set_bucket_config("open", &BucketConfig { public_read: true })
+            .unwrap();
+
+        let res = send(
+            app(st),
+            Request::builder()
+                .uri("/objects/open/k")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"hi");
+    }
+
+    #[tokio::test]
+    async fn private_bucket_read_denied_without_auth() {
+        let (st, _basic) = state_with_auth();
+        st.engine.put("secret", "k", b"hi", "text/plain").unwrap();
+        let res = send(
+            app(st),
+            Request::builder()
+                .uri("/objects/secret/k")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn owner_can_toggle_visibility() {
+        let (st, basic) = state_with_auth();
+        st.engine.put("b", "k", b"hi", "text/plain").unwrap();
+        let res = send(
+            app(st.clone()),
+            Request::builder()
+                .method("POST")
+                .uri("/buckets/b/visibility")
+                .header(header::AUTHORIZATION, &basic)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"public_read":true}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(st.engine.is_public("b").unwrap());
     }
 }

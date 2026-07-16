@@ -8,10 +8,13 @@ license.workspace = true
 barme-core.workspace = true
 barme-engine.workspace = true
 barme-semantic.workspace = true
+barme-auth.workspace = true
 axum.workspace = true
 tokio.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
+base64 = "0.22"
+tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -74,11 +74,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3_state = S3State {
         engine: engine.clone(),
-        creds,
+        creds: creds.clone(),
     };
     let native_state = AppState {
         engine: engine.clone(),
         semantic,
+        creds,
     };
 
     tokio::try_join!(

@@ -68,6 +68,13 @@ impl Credentials {
         Some(Credentials { keys })
     }
 
+    /// Build credentials from a single access-key/secret pair.
+    pub fn single(access_key: impl Into<String>, secret_key: impl Into<String>) -> Self {
+        let mut keys = HashMap::new();
+        keys.insert(access_key.into(), secret_key.into());
+        Credentials { keys }
+    }
+
     pub fn secret(&self, access_key: &str) -> Option<&str> {
         self.keys.get(access_key).map(String::as_str)
     }
