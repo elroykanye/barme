@@ -51,6 +51,24 @@ impl PointerStore {
             .collect()
     }
 
+    /// Every bucket that has ever held a key. GC's mark starts here, fanning
+    /// out to keys and their histories. Order is unspecified.
+    pub fn buckets(&self) -> Result<Vec<String>> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut buckets = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                buckets.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Ok(buckets)
+    }
+
     /// Keys currently present in a bucket. Order is unspecified.
     pub fn list(&self, bucket: &str) -> Result<Vec<String>> {
         let dir = self.bucket_dir(bucket)?;

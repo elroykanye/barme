@@ -7,3 +7,7 @@ license.workspace = true
 [dependencies]
 barme-core.workspace = true
 barme-store.workspace = true
+
+[dev-dependencies]
+barme-chunk.workspace = true
+tempfile = "3"

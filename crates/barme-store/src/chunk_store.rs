@@ -4,7 +4,13 @@
 
 use crate::{shard, write_atomic, Result, StoreError};
 use barme_core::Hash;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Name of the condemned-set file, sitting at the chunk root beside the shard
+/// dirs. Leading dot keeps it out of `all()`, which only descends the two-hex
+/// shard directories.
+const CONDEMNED: &str = ".condemned";
 
 pub struct ChunkStore {
     root: PathBuf,
@@ -57,6 +63,44 @@ impl ChunkStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Every chunk currently stored. GC's sweep walks this against the reachable
+    /// set. Descends the two-hex shard dirs and parses filenames back to hashes.
+    pub fn all(&self) -> Result<Vec<Hash>> {
+        let shards = match std::fs::read_dir(&self.root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for shard in shards {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue; // skips the .condemned file
+            }
+            for entry in std::fs::read_dir(shard.path())? {
+                let name = entry?.file_name();
+                let hex = name.to_string_lossy();
+                out.push(format!("blake3:{hex}").parse()?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The condemned set: chunk -> unix-seconds it was first condemned. GC reads
+    /// it whole, mutates in memory, and writes it back with `save_condemned`.
+    pub fn load_condemned(&self) -> Result<HashMap<Hash, u64>> {
+        match std::fs::read(self.root.join(CONDEMNED)) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Replace the condemned set atomically.
+    pub fn save_condemned(&self, set: &HashMap<Hash, u64>) -> Result<()> {
+        write_atomic(&self.root.join(CONDEMNED), &serde_json::to_vec(set)?)
     }
 }
 
