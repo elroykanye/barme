@@ -20,9 +20,10 @@ barme-native.workspace = true
 barme-semantic.workspace = true
 barme-auth.workspace = true
 barme-cdn.workspace = true
+barme-config.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 axum = { workspace = true, optional = true }
 rust-embed = { version = "8", optional = true }
 mime_guess = { version = "2", optional = true }

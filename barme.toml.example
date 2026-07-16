@@ -1,0 +1,32 @@
+# Barme server config. Copy to barme.toml and edit; environment variables
+# override these values. Point elsewhere with BARME_CONFIG=/path/to.toml.
+
+data_dir = "./barme-data"
+
+s3_addr = "0.0.0.0:9000"
+native_addr = "0.0.0.0:7373"
+cdn_addr = "0.0.0.0:7375"
+console_addr = "0.0.0.0:7374"
+
+cors_origins = ["*"]
+
+# Garbage collection: how long a chunk stays condemned before erase, and how
+# often the sweep runs.
+gc_grace_secs = 86400
+gc_interval_secs = 3600
+
+# Semantic search (optional): point at an embedder speaking barme's contract.
+# embed_url = "http://localhost:11434/embed"
+# embed_model = "nomic-embed-text"
+
+# Default storage policy for new writes (per-pot overrides land on top).
+[default_policy]
+codec = "zstd"
+zstd_level = 0
+tenant = "default"
+policy_name = "default@v1"
+
+# Bootstrap owner credential (or set BARME_ACCESS_KEY / BARME_SECRET_KEY).
+# [credentials]
+# access_key = "owner"
+# secret_key = "change-me"

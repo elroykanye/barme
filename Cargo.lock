@@ -94,6 +94,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "barme-cdn"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "barme-core",
+ "barme-engine",
+ "tokio",
+ "tower-http",
+]
+
+[[package]]
 name = "barme-chunk"
 version = "0.0.0"
 dependencies = [
@@ -131,6 +142,7 @@ dependencies = [
  "barme-gc",
  "barme-store",
  "hex",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
@@ -213,6 +225,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "barme-auth",
+ "barme-cdn",
  "barme-engine",
  "barme-native",
  "barme-s3",

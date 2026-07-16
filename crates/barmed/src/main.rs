@@ -61,14 +61,24 @@ mod ui {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    use tracing_subscriber::EnvFilter;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
 
-    // One engine, one policy for now; per-bucket policy lands later.
-    let mut engine = Engine::open("./barme-data", Policy::default())?;
+    let config = barme_config::Config::load()?;
 
-    let semantic = match std::env::var("BARME_EMBED_URL") {
-        Ok(url) => {
-            let model = std::env::var("BARME_EMBED_MODEL").unwrap_or_default();
+    let policy = Policy {
+        codec: config.default_policy.codec.clone(),
+        zstd_level: config.default_policy.zstd_level,
+        tenant: config.default_policy.tenant.clone(),
+        policy_name: config.default_policy.policy_name.clone(),
+    };
+    let mut engine = Engine::open(&config.data_dir, policy)?;
+
+    let semantic = match config.embed_url.clone() {
+        Some(url) => {
+            let model = config.embed_model.clone();
             let semantic = Arc::new(Semantic::new(
                 Box::new(HttpEmbedder::new(url, model)),
                 Box::new(MemoryIndex::new()),
@@ -96,25 +106,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::info!("semantic search enabled");
             Some(semantic)
         }
-        Err(_) => {
-            tracing::info!("semantic search disabled (set BARME_EMBED_URL to enable)");
+        None => {
+            tracing::info!("semantic search disabled (set embed_url to enable)");
             None
         }
     };
 
     let engine = Arc::new(engine);
 
-    let creds = Credentials::from_env().map(Arc::new);
+    let creds = config
+        .credentials
+        .as_ref()
+        .map(|c| Arc::new(Credentials::single(&c.access_key, &c.secret_key)));
     match &creds {
         Some(_) => tracing::info!("credentials loaded; auth enforced"),
-        None => tracing::warn!(
-            "no credentials set (BARME_ACCESS_KEY / BARME_SECRET_KEY); running open"
-        ),
+        None => tracing::warn!("no credentials set; running open"),
     }
 
-    let s3_addr: SocketAddr = "0.0.0.0:9000".parse()?;
-    let native_addr: SocketAddr = "0.0.0.0:7373".parse()?;
-    let cdn_addr: SocketAddr = "0.0.0.0:7375".parse()?;
+    // Periodic garbage collection. Without this, deleted objects' chunks are
+    // never reclaimed.
+    {
+        let engine = engine.clone();
+        let grace = std::time::Duration::from_secs(config.gc_grace_secs);
+        let interval_secs = config.gc_interval_secs.max(1);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                match engine.gc_sweep(now, grace) {
+                    Ok(s) if s.condemned > 0 || s.erased > 0 => {
+                        tracing::info!(
+                            "gc: {} condemned, {} erased, {} live",
+                            s.condemned,
+                            s.erased,
+                            s.live
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("gc sweep failed: {e}"),
+                }
+            }
+        });
+    }
+
+    let s3_addr: SocketAddr = config.s3_addr.parse()?;
+    let native_addr: SocketAddr = config.native_addr.parse()?;
+    let cdn_addr: SocketAddr = config.cdn_addr.parse()?;
     tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}, cdn on {cdn_addr}");
 
     let s3_state = S3State {
@@ -133,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "ui")]
     {
-        let console_addr: SocketAddr = "0.0.0.0:7374".parse()?;
+        let console_addr: SocketAddr = config.console_addr.parse()?;
         tracing::info!("console on {console_addr}");
         let console = async move {
             let listener = tokio::net::TcpListener::bind(console_addr).await?;

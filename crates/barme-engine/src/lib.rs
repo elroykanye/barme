@@ -256,6 +256,13 @@ impl Engine {
         Ok(self.store.pointers.copy(fb, fk, tb, tk)?)
     }
 
+    /// Run one garbage-collection sweep. `now_secs` is injected so the caller
+    /// owns the clock; `grace` is how long a chunk stays condemned before it's
+    /// erased. Returns what the pass did.
+    pub fn gc_sweep(&self, now_secs: u64, grace: std::time::Duration) -> Result<barme_gc::Sweep> {
+        Ok(barme_gc::Gc::new(&self.store, grace).sweep(now_secs)?)
+    }
+
     /// Storage-wide statistics. `logical_bytes` is what users think they stored
     /// (sum of current object sizes); `physical_bytes` is what's actually on
     /// disk after dedup and compression. The gap is the win.

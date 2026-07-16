@@ -21,6 +21,7 @@ barme-native = { path = "crates/barme-native" }
 barme-semantic = { path = "crates/barme-semantic" }
 barme-auth = { path = "crates/barme-auth" }
 barme-cdn = { path = "crates/barme-cdn" }
+barme-config = { path = "crates/barme-config" }
 
 blake3 = "1"
 fastcdc = "3"
