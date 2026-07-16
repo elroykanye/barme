@@ -1,0 +1,11 @@
+[package]
+name = "barme-store"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+barme-core.workspace = true
+thiserror.workspace = true
+# Backend for the manifest/pointer index is still open (see ARCHITECTURE.md).
+# Chunks land on the filesystem, addressed by hash.

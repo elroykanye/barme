@@ -1,0 +1,10 @@
+[package]
+name = "barme-codec"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+barme-core.workspace = true
+zstd.workspace = true
+# jpeg-xl and avif bindings come later, when the image route lands.

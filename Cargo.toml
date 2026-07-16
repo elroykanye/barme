@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = ""
+
+# Shared versions. Bump with `cargo update` once the toolchain is up;
+# these are major pins, so they resolve to the latest compatible release.
+[workspace.dependencies]
+barme-core = { path = "crates/barme-core" }
+barme-chunk = { path = "crates/barme-chunk" }
+barme-codec = { path = "crates/barme-codec" }
+barme-store = { path = "crates/barme-store" }
+barme-gc = { path = "crates/barme-gc" }
+barme-engine = { path = "crates/barme-engine" }
+barme-s3 = { path = "crates/barme-s3" }
+barme-native = { path = "crates/barme-native" }
+barme-semantic = { path = "crates/barme-semantic" }
+
+blake3 = "1"
+fastcdc = "3"
+zstd = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

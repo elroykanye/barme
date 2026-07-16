@@ -1,0 +1,9 @@
+[package]
+name = "barme-chunk"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+barme-core.workspace = true
+fastcdc.workspace = true
