@@ -96,6 +96,7 @@ dependencies = [
 name = "barme-auth"
 version = "0.0.0"
 dependencies = [
+ "barme-core",
  "hex",
  "hmac",
  "sha2 0.10.9",

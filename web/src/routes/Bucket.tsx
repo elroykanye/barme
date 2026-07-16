@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { api, cdnUrl, downloadToDisk, publicUrl } from "@/lib/api";
 import { humanSize, shortHash } from "@/lib/format";
+import { copyText } from "@/lib/clipboard";
 import { useToast } from "@/lib/toast";
 import { useDialogs } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
@@ -270,8 +271,7 @@ function ObjectPanel({
   });
 
   function copy(url: string, label: string) {
-    navigator.clipboard
-      .writeText(url)
+    copyText(url)
       .then(() => toast(`${label} copied`, "success"))
       .catch(() => toast("Copy failed", "error"));
   }
