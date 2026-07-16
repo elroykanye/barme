@@ -164,7 +164,48 @@ fn print_banner(config: &barme_config::Config, ui: bool) {
     println!("  API docs   {}/docs", http_base(&config.native_addr));
     println!("  S3         {}", http_base(&config.s3_addr));
     println!("  CDN        {}", http_base(&config.cdn_addr));
+    if let Some(c) = &config.credentials {
+        if c.access_key == "barme" && c.secret_key == "barme" {
+            println!("  login      barme / barme  (default — set BARME_ACCESS_KEY / BARME_SECRET_KEY)");
+        } else {
+            println!("  login      {} / (from config)", c.access_key);
+        }
+    }
     println!();
+}
+
+/// Bind `desired`, rolling forward to the next port if it's already taken, so a
+/// stray old instance or a leftover WSL port relay doesn't stop barmed coming
+/// up. Returns the listener actually bound.
+async fn bind_with_fallback(
+    desired: SocketAddr,
+    label: &str,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let mut addr = desired;
+    for _ in 0..64 {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if addr.port() != desired.port() {
+                    tracing::warn!(
+                        "{label}: port {} in use, bound {} instead",
+                        desired.port(),
+                        addr.port()
+                    );
+                }
+                return Ok(listener);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => match addr.port().checked_add(1)
+            {
+                Some(p) => addr.set_port(p),
+                None => break,
+            },
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AddrInUse,
+        format!("{label}: no free port found at or above {}", desired.port()),
+    ))
 }
 
 // A generous worker count on purpose: request handlers call the engine's
@@ -201,7 +242,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(v) = cli.console_addr {
         config.console_addr = v;
     }
-    print_banner(&config, cfg!(feature = "ui"));
 
     let policy = Policy {
         codec: config.default_policy.codec.clone(),
@@ -300,10 +340,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let s3_addr: SocketAddr = config.s3_addr.parse()?;
-    let native_addr: SocketAddr = config.native_addr.parse()?;
-    let cdn_addr: SocketAddr = config.cdn_addr.parse()?;
-    tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}, cdn on {cdn_addr}");
+    // Bind every door up front, rolling to the next free port if one is taken,
+    // then rewrite the config to what we actually bound so the banner and the
+    // CDN base URL handed to the API reflect reality.
+    let s3_listener = bind_with_fallback(config.s3_addr.parse()?, "S3").await?;
+    let native_listener = bind_with_fallback(config.native_addr.parse()?, "API").await?;
+    let cdn_listener = bind_with_fallback(config.cdn_addr.parse()?, "CDN").await?;
+    config.s3_addr = s3_listener.local_addr()?.to_string();
+    config.native_addr = native_listener.local_addr()?.to_string();
+    config.cdn_addr = cdn_listener.local_addr()?.to_string();
+    #[cfg(feature = "ui")]
+    let console_listener = bind_with_fallback(config.console_addr.parse()?, "console").await?;
+    #[cfg(feature = "ui")]
+    {
+        config.console_addr = console_listener.local_addr()?.to_string();
+    }
+
+    print_banner(&config, cfg!(feature = "ui"));
+    tracing::info!(
+        "barmed: S3 on {}, native on {}, cdn on {}",
+        config.s3_addr,
+        config.native_addr,
+        config.cdn_addr
+    );
 
     let s3_state = S3State {
         engine: engine.clone(),
@@ -315,18 +374,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         started: std::time::Instant::now(),
     };
 
-    let s3 = barme_s3::serve(s3_state, s3_addr);
-    let native = barme_native::serve(native_state, native_addr);
-    let cdn = barme_cdn::serve(engine.clone(), cdn_addr);
+    let s3 = barme_s3::serve(s3_state, s3_listener);
+    let native = barme_native::serve(native_state, native_listener);
+    let cdn = barme_cdn::serve(engine.clone(), cdn_listener);
 
     #[cfg(feature = "ui")]
     {
-        let console_addr: SocketAddr = config.console_addr.parse()?;
-        tracing::info!("console on {console_addr}");
-        let console = async move {
-            let listener = tokio::net::TcpListener::bind(console_addr).await?;
-            axum::serve(listener, ui::router()).await
-        };
+        let console = async move { axum::serve(console_listener, ui::router()).await };
         tokio::try_join!(s3, native, cdn, console)?;
     }
     #[cfg(not(feature = "ui"))]

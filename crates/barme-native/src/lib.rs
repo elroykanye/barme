@@ -7,7 +7,6 @@
 //! open. Reads obey bucket visibility; writes, deletes, listing, search, and
 //! fetch-by-hash require the owner. CORS is permissive so a browser can call in.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -120,8 +119,7 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, app(state)).await
 }
 

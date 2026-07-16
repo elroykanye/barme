@@ -11,6 +11,17 @@ fn main() {
     }
 
     let web = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web");
+
+    // Allow a prebuilt frontend: set BARME_SKIP_WEB_BUILD when web/dist is already
+    // populated (e.g. built in an earlier Docker stage) so the Rust build needs no
+    // Node toolchain of its own.
+    if std::env::var("BARME_SKIP_WEB_BUILD").is_ok() {
+        if !web.join("dist").join("index.html").exists() {
+            panic!("BARME_SKIP_WEB_BUILD set but web/dist/index.html is missing");
+        }
+        return;
+    }
+
     println!("cargo:rerun-if-changed={}", web.join("src").display());
     println!("cargo:rerun-if-changed={}", web.join("package.json").display());
     println!("cargo:rerun-if-changed={}", web.join("index.html").display());

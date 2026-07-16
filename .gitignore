@@ -3,4 +3,7 @@
 .DS_Store
 *.pdb
 /barme-data
+**/barme-data/
 /barme.toml
+web/dist/
+web/node_modules/

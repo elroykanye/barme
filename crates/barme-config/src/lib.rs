@@ -53,7 +53,12 @@ impl Default for Config {
             gc_grace_secs: 86_400,
             gc_interval_secs: 3_600,
             default_policy: PolicyConfig::default(),
-            credentials: None,
+            // A known default so the door isn't open out of the box. Override in
+            // barme.toml or via BARME_ACCESS_KEY / BARME_SECRET_KEY.
+            credentials: Some(Credential {
+                access_key: "barme".into(),
+                secret_key: "barme".into(),
+            }),
             embed_url: None,
             embed_model: String::new(),
         }

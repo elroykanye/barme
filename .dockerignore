@@ -1,0 +1,7 @@
+target/
+web/node_modules/
+web/dist/
+barme-data/
+**/barme-data/
+.git/
+*.log

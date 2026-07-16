@@ -11,7 +11,6 @@
 //! Scope: the parts real clients use first. The long tail of bucket
 //! sub-resources (ACLs, lifecycle, policies) comes later.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -66,9 +65,8 @@ pub fn app(state: S3State) -> Router {
         .with_state(state)
 }
 
-/// Bind and serve until the process ends.
-pub async fn serve(state: S3State, addr: SocketAddr) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+/// Serve on a pre-bound listener until the process ends.
+pub async fn serve(state: S3State, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, app(state)).await
 }
 

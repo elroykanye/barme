@@ -36,8 +36,7 @@ pub fn app(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-pub async fn serve(engine: Arc<Engine>, addr: std::net::SocketAddr) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+pub async fn serve(engine: Arc<Engine>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, app(engine)).await
 }
 
