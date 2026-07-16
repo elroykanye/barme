@@ -22,7 +22,7 @@ export function Home() {
 
       <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat icon={<Package className="size-4" />} label="Objects" value={s ? String(s.objects) : "—"} />
-        <Stat icon={<Database className="size-4" />} label="Buckets" value={s ? String(s.buckets) : "—"} />
+        <Stat icon={<Database className="size-4" />} label="Pots" value={s ? String(s.buckets) : "—"} />
         <Stat
           icon={<HardDrive className="size-4" />}
           label="On disk"
@@ -38,12 +38,12 @@ export function Home() {
         />
       </div>
 
-      <h2 className="mb-3 text-sm font-medium text-muted">Buckets</h2>
+      <h2 className="mb-3 text-sm font-medium text-muted">Pots</h2>
       {buckets.isLoading ? (
         <p className="text-sm text-muted">Loading…</p>
       ) : !buckets.data?.length ? (
         <div className="rounded-xl border border-dashed border-border p-12 text-center">
-          <p className="text-sm text-muted">No buckets yet.</p>
+          <p className="text-sm text-muted">No pots yet.</p>
           <p className="mt-1 text-xs text-faint">
             Create one with the + in the sidebar, then upload a file.
           </p>
@@ -53,7 +53,7 @@ export function Home() {
           {buckets.data.map((b) => (
             <Link
               key={b.name}
-              to={`/b/${encodeURIComponent(b.name)}`}
+              to={`/p/${encodeURIComponent(b.name)}`}
               className="group rounded-xl border border-border bg-panel p-4 transition-colors hover:border-accent/50 hover:bg-elevated"
             >
               <div className="mb-3 flex items-center justify-between">

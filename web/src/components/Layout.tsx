@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, Outlet, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Database, LogOut, Plus, Search } from "lucide-react";
+import { Database, LogOut, Moon, Plus, Search, Sun } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { useDialogs } from "@/lib/dialogs";
+import { applyTheme, getTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "./CommandPalette";
 
@@ -11,8 +13,16 @@ export function Layout() {
   const { bucket } = useParams();
   const navigate = useNavigate();
   const { logout, creds } = useAuth();
+  const { prompt } = useDialogs();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [theme, setTheme] = useState<Theme>(getTheme());
   const buckets = useQuery({ queryKey: ["buckets"], queryFn: api.listBuckets });
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    applyTheme(next);
+    setTheme(next);
+  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -25,9 +35,16 @@ export function Layout() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  function newBucket() {
-    const name = window.prompt("New bucket name")?.trim();
-    if (name) navigate(`/b/${encodeURIComponent(name)}`);
+  async function newBucket() {
+    const name = (
+      await prompt({
+        title: "New pot",
+        label: "Pot name",
+        placeholder: "e.g. photos",
+        submitLabel: "Create",
+      })
+    )?.trim();
+    if (name) navigate(`/p/${encodeURIComponent(name)}`);
   }
 
   return (
@@ -39,7 +56,7 @@ export function Layout() {
         </Link>
 
         <div className="flex items-center justify-between px-4 pb-2 pt-4">
-          <span className="text-[11px] uppercase tracking-wider text-faint">Buckets</span>
+          <span className="text-[11px] uppercase tracking-wider text-faint">Pots</span>
           <button onClick={newBucket} className="text-muted transition-colors hover:text-text">
             <Plus className="size-4" />
           </button>
@@ -50,7 +67,7 @@ export function Layout() {
             buckets.data.map((b) => (
               <Link
                 key={b.name}
-                to={`/b/${encodeURIComponent(b.name)}`}
+                to={`/p/${encodeURIComponent(b.name)}`}
                 className={cn(
                   "flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
                   bucket === b.name
@@ -68,7 +85,7 @@ export function Layout() {
               </Link>
             ))
           ) : (
-            <p className="px-2 text-xs text-faint">No buckets yet.</p>
+            <p className="px-2 text-xs text-faint">No pots yet.</p>
           )}
         </nav>
       </aside>
@@ -84,6 +101,13 @@ export function Layout() {
             <kbd className="ml-6 rounded bg-elevated px-1.5 py-0.5 font-mono text-[11px]">⌘K</kbd>
           </button>
           <div className="flex items-center gap-3 text-sm">
+            <button
+              onClick={toggleTheme}
+              className="text-muted transition-colors hover:text-text"
+              title="Toggle theme"
+            >
+              {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
+            </button>
             <span className="text-muted">{creds?.access}</span>
             <button onClick={logout} className="text-muted transition-colors hover:text-danger" title="Sign out">
               <LogOut className="size-4" />

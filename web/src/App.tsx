@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { ToastProvider } from "@/lib/toast";
+import { DialogProvider } from "@/lib/dialogs";
 import { Layout } from "@/components/Layout";
 import { Login } from "@/routes/Login";
 import { Home } from "@/routes/Home";
@@ -18,7 +19,7 @@ function Gate() {
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Home />} />
-        <Route path="/b/:bucket" element={<BucketView />} />
+        <Route path="/p/:bucket" element={<BucketView />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
@@ -29,11 +30,13 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ToastProvider>
-        <AuthProvider>
-          <BrowserRouter>
-            <Gate />
-          </BrowserRouter>
-        </AuthProvider>
+        <DialogProvider>
+          <AuthProvider>
+            <BrowserRouter>
+              <Gate />
+            </BrowserRouter>
+          </AuthProvider>
+        </DialogProvider>
       </ToastProvider>
     </QueryClientProvider>
   );

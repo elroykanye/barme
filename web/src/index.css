@@ -18,6 +18,22 @@
   --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
 }
 
+/* Light theme: overrides the dark tokens above when the root opts in. */
+:root[data-theme="light"] {
+  --color-bg: #f7f8fa;
+  --color-panel: #ffffff;
+  --color-elevated: #eef1f5;
+  --color-border: #e2e6ec;
+  --color-text: #1a1d24;
+  --color-muted: #5b6472;
+  --color-faint: #99a1b0;
+  --color-accent: #6d5efc;
+  --color-accent-ink: #ffffff;
+  --color-ok: #0f9d58;
+  --color-warn: #b26a00;
+  --color-danger: #dc2626;
+}
+
 html,
 body,
 #root {

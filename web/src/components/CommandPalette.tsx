@@ -50,20 +50,20 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && onClose()}
-            placeholder="Search buckets, or objects by meaning…"
+            placeholder="Search pots, or objects by meaning…"
             className="w-full bg-transparent py-3.5 text-sm outline-none placeholder:text-faint"
           />
         </div>
 
         <div className="max-h-80 overflow-y-auto p-2">
           {bucketMatches.length > 0 && (
-            <div className="px-2 py-1 text-[11px] uppercase tracking-wider text-faint">Buckets</div>
+            <div className="px-2 py-1 text-[11px] uppercase tracking-wider text-faint">Pots</div>
           )}
           {bucketMatches.map((b) => (
             <button
               key={b.name}
               onClick={() => {
-                navigate(`/b/${encodeURIComponent(b.name)}`);
+                navigate(`/p/${encodeURIComponent(b.name)}`);
                 onClose();
               }}
               className="flex w-full items-center rounded-md px-2 py-2 text-left text-sm hover:bg-elevated"

@@ -17,6 +17,7 @@ import {
 import { api, cdnUrl, downloadToDisk, publicUrl } from "@/lib/api";
 import { humanSize, shortHash } from "@/lib/format";
 import { useToast } from "@/lib/toast";
+import { useDialogs } from "@/lib/dialogs";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,6 +27,7 @@ export function BucketView() {
   const { bucket = "" } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
+  const { prompt, confirm } = useDialogs();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -60,29 +62,37 @@ export function BucketView() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["buckets"] }),
   });
 
-  function renameBucket() {
-    const name = window.prompt("Rename bucket to", bucket)?.trim();
+  async function renameBucket() {
+    const name = (
+      await prompt({ title: "Rename pot", label: "New name", defaultValue: bucket })
+    )?.trim();
     if (!name || name === bucket) return;
-    api
-      .renameBucket(bucket, name)
-      .then(() => {
-        qc.invalidateQueries({ queryKey: ["buckets"] });
-        toast("Bucket renamed", "success");
-        navigate(`/b/${encodeURIComponent(name)}`);
-      })
-      .catch(() => toast("Rename failed (name taken?)", "error"));
+    try {
+      await api.renameBucket(bucket, name);
+      qc.invalidateQueries({ queryKey: ["buckets"] });
+      toast("Pot renamed", "success");
+      navigate(`/p/${encodeURIComponent(name)}`);
+    } catch {
+      toast("Rename failed (name taken?)", "error");
+    }
   }
 
-  function deleteBucket() {
-    if (!window.confirm(`Delete bucket "${bucket}" and all its objects?`)) return;
-    api
-      .deleteBucket(bucket)
-      .then(() => {
-        qc.invalidateQueries({ queryKey: ["buckets"] });
-        toast("Bucket deleted", "success");
-        navigate("/");
-      })
-      .catch(() => toast("Delete failed", "error"));
+  async function deleteBucket() {
+    const ok = await confirm({
+      title: "Delete pot",
+      message: `Delete pot "${bucket}" and all its objects? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteBucket(bucket);
+      qc.invalidateQueries({ queryKey: ["buckets"] });
+      toast("Pot deleted", "success");
+      navigate("/");
+    } catch {
+      toast("Delete failed", "error");
+    }
   }
 
   const rows = (objects.data ?? []).filter((o) =>
@@ -126,10 +136,10 @@ export function BucketView() {
                 {info.public_read ? "Make private" : "Make public"}
               </Button>
             )}
-            <Button variant="ghost" onClick={renameBucket} title="Rename bucket">
+            <Button variant="ghost" onClick={renameBucket} title="Rename pot">
               <Pencil className="size-4" />
             </Button>
-            <Button variant="danger" onClick={deleteBucket} title="Delete bucket">
+            <Button variant="danger" onClick={deleteBucket} title="Delete pot">
               <Trash2 className="size-4" />
             </Button>
             <Button onClick={() => fileRef.current?.click()}>
@@ -238,6 +248,7 @@ function ObjectPanel({
   onChanged: () => void;
 }) {
   const toast = useToast();
+  const { prompt, confirm } = useDialogs();
   const manifest = useQuery({
     queryKey: ["manifest", bucket, objectKey],
     queryFn: () => api.manifest(bucket, objectKey),
@@ -265,41 +276,52 @@ function ObjectPanel({
       .catch(() => toast("Copy failed", "error"));
   }
 
-  function rename() {
-    const to = window.prompt("Rename key to", objectKey)?.trim();
+  async function rename() {
+    const to = (
+      await prompt({ title: "Rename object", label: "New key", defaultValue: objectKey })
+    )?.trim();
     if (!to || to === objectKey) return;
-    api.moveObject(bucket, objectKey, bucket, to).then(() => {
-      toast("Renamed", "success");
-      onChanged();
-      onClose();
-    });
+    await api.moveObject(bucket, objectKey, bucket, to);
+    toast("Renamed", "success");
+    onChanged();
+    onClose();
   }
 
-  function move(copyInstead: boolean) {
-    const dest = window.prompt(
-      `${copyInstead ? "Copy" : "Move"} to (bucket/key)`,
-      `${bucket}/${objectKey}`,
+  async function move(copyInstead: boolean) {
+    const dest = (
+      await prompt({
+        title: copyInstead ? "Copy object" : "Move object",
+        label: "Destination (pot/key)",
+        defaultValue: `${bucket}/${objectKey}`,
+      })
     )?.trim();
     if (!dest) return;
     const i = dest.indexOf("/");
-    if (i < 1) return toast("Use bucket/key", "error");
+    if (i < 1) {
+      toast("Use pot/key", "error");
+      return;
+    }
     const tb = dest.slice(0, i);
     const tk = dest.slice(i + 1);
     const fn = copyInstead ? api.copyObject : api.moveObject;
-    fn(bucket, objectKey, tb, tk).then(() => {
-      toast(copyInstead ? "Copied" : "Moved", "success");
-      onChanged();
-      if (!copyInstead) onClose();
-    });
+    await fn(bucket, objectKey, tb, tk);
+    toast(copyInstead ? "Copied" : "Moved", "success");
+    onChanged();
+    if (!copyInstead) onClose();
   }
 
-  function del() {
-    if (!window.confirm(`Delete "${objectKey}"?`)) return;
-    api.remove(bucket, objectKey).then(() => {
-      toast("Deleted", "success");
-      onChanged();
-      onClose();
+  async function del() {
+    const ok = await confirm({
+      title: "Delete object",
+      message: `Delete "${objectKey}"?`,
+      confirmLabel: "Delete",
+      danger: true,
     });
+    if (!ok) return;
+    await api.remove(bucket, objectKey);
+    toast("Deleted", "success");
+    onChanged();
+    onClose();
   }
 
   return (
