@@ -149,6 +149,12 @@ impl Engine {
         self.read_manifest_bytes(object_id)
     }
 
+    /// Fetch a manifest by object_id, without reading the bytes. Used by the
+    /// native door's content-by-hash and introspection endpoints.
+    pub fn object_manifest(&self, object_id: &Hash) -> Result<Option<Manifest>> {
+        Ok(self.store.manifests.get(object_id)?)
+    }
+
     pub fn delete(&self, bucket: &str, key: &str) -> Result<()> {
         Ok(self.store.pointers.remove(bucket, key)?)
     }
