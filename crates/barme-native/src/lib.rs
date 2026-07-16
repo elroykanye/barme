@@ -111,6 +111,7 @@ pub fn app(state: AppState) -> Router {
         .route("/search", post(search))
         .route("/similar/{hash}", post(similar))
         .route("/sync", post(not_yet))
+        .route("/docs", get(docs))
         // Allow large uploads; the whole body is buffered for now (streaming
         // multipart lands later).
         .layer(axum::extract::DefaultBodyLimit::disable())
@@ -837,6 +838,63 @@ fn now_unix() -> u64 {
 async fn not_yet(_body: Bytes) -> Response {
     (StatusCode::NOT_IMPLEMENTED, "not implemented yet").into_response()
 }
+
+/// A simple, self-contained API reference for the native door.
+async fn docs() -> axum::response::Html<&'static str> {
+    axum::response::Html(DOCS_HTML)
+}
+
+const DOCS_HTML: &str = r#"<!doctype html><html><head><meta charset=utf-8>
+<title>barme API</title><meta name=viewport content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;background:#0b0d11;color:#e6e9ef;font:14px/1.6 system-ui,sans-serif}
+main{max-width:820px;margin:0 auto;padding:32px 20px}
+h1{font-size:1.4rem;letter-spacing:-.02em}h2{margin-top:28px;font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:#8b93a1}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:linear-gradient(135deg,#7c6cff,#c084fc);margin-right:8px}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+td{padding:7px 8px;border-bottom:1px solid #232a33;vertical-align:top}
+.m{font:12px ui-monospace,monospace;color:#43d17a;white-space:nowrap}
+code{font:12px ui-monospace,monospace;color:#e6e9ef}.d{color:#8b93a1}
+a{color:#7c6cff}
+</style></head><body><main>
+<h1><span class=dot></span>barme API</h1>
+<p class=d>Native API. Auth is HTTP Basic (access:secret); reads on public pots are open. S3 clients use the S3 door with SigV4.</p>
+
+<h2>Pots</h2><table>
+<tr><td class=m>GET</td><td><code>/pots</code></td><td class=d>list pots</td></tr>
+<tr><td class=m>DELETE</td><td><code>/pots/{pot}</code></td><td class=d>delete a pot</td></tr>
+<tr><td class=m>POST</td><td><code>/pots/{pot}/rename</code></td><td class=d>{new_name}</td></tr>
+<tr><td class=m>POST</td><td><code>/pots/{pot}/visibility</code></td><td class=d>{public_read}</td></tr>
+<tr><td class=m>GET/PUT</td><td><code>/pots/{pot}/config</code></td><td class=d>storage policy + lifecycle</td></tr>
+<tr><td class=m>GET</td><td><code>/pots/{pot}/objects</code></td><td class=d>list objects</td></tr>
+<tr><td class=m>POST</td><td><code>/pots/{pot}/import</code></td><td class=d>{url,key} — fetch & store</td></tr>
+<tr><td class=m>GET</td><td><code>/pots/{pot}/zip?keys=a,b</code></td><td class=d>download as zip</td></tr>
+</table>
+
+<h2>Objects</h2><table>
+<tr><td class=m>GET/PUT/DELETE</td><td><code>/objects/{pot}/{key}</code></td><td class=d>download / upload / delete</td></tr>
+<tr><td class=m>GET</td><td><code>/manifest/{pot}/{key}</code></td><td class=d>how it was stored</td></tr>
+<tr><td class=m>GET</td><td><code>/history/{pot}/{key}</code></td><td class=d>version list</td></tr>
+<tr><td class=m>GET/PUT</td><td><code>/meta/{pot}/{key}</code></td><td class=d>tags, note, favorite, lock</td></tr>
+<tr><td class=m>POST</td><td><code>/restore/{pot}/{key}</code></td><td class=d>{object_id} — roll back</td></tr>
+<tr><td class=m>GET</td><td><code>/diff/{pot}/{key}?a&b</code></td><td class=d>version diff</td></tr>
+<tr><td class=m>POST</td><td><code>/verify/{pot}/{key}</code></td><td class=d>re-hash integrity check</td></tr>
+<tr><td class=m>POST</td><td><code>/presign/{pot}/{key}</code></td><td class=d>{expires_secs} — share link</td></tr>
+<tr><td class=m>GET</td><td><code>/content/{hash}</code></td><td class=d>fetch by content hash</td></tr>
+</table>
+
+<h2>Search &amp; AI</h2><table>
+<tr><td class=m>POST</td><td><code>/search</code></td><td class=d>{query} — semantic search</td></tr>
+<tr><td class=m>POST</td><td><code>/similar/{hash}</code></td><td class=d>nearest objects</td></tr>
+</table>
+
+<h2>Admin</h2><table>
+<tr><td class=m>GET</td><td><code>/stats</code> · <code>/health</code> · <code>/metrics</code></td><td class=d>storage stats, health, Prometheus</td></tr>
+<tr><td class=m>GET/POST</td><td><code>/keys</code></td><td class=d>list / create access keys</td></tr>
+<tr><td class=m>DELETE</td><td><code>/keys/{access}</code></td><td class=d>revoke a key</td></tr>
+<tr><td class=m>GET/POST</td><td><code>/webhooks</code></td><td class=d>list / create webhooks</td></tr>
+</table>
+</main></body></html>"#;
 
 fn with_bytes(content_type: &str, bytes: Vec<u8>) -> Response {
     let mut out = HeaderMap::new();

@@ -122,14 +122,81 @@ mod ui {
     }
 }
 
+/// Barme object store server.
+#[derive(clap::Parser)]
+#[command(name = "barmed", version, about = "Barme — a content-addressed object store")]
+struct Cli {
+    /// Config file to load (default: barme.toml, or $BARME_CONFIG)
+    #[arg(long, value_name = "FILE")]
+    config: Option<String>,
+    /// Data directory (overrides config)
+    #[arg(long, value_name = "DIR")]
+    data_dir: Option<String>,
+    /// Native API bind address, e.g. 0.0.0.0:7373
+    #[arg(long)]
+    native_addr: Option<String>,
+    /// S3 API bind address
+    #[arg(long)]
+    s3_addr: Option<String>,
+    /// CDN bind address
+    #[arg(long)]
+    cdn_addr: Option<String>,
+    /// Web console bind address (with the `ui` feature)
+    #[arg(long)]
+    console_addr: Option<String>,
+}
+
+fn print_banner(config: &barme_config::Config, ui: bool) {
+    const ART: &str = r"
+     ___   __ _ _ _ _ __  ___
+    | _ ) / _` | '_| '  \/ -_)
+    |___/ \__,_|_| |_|_|_\___|
+";
+    println!("{ART}");
+    println!(
+        "  v{}  ·  content-addressed object store\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    if ui {
+        println!("  console    {}", http_base(&config.console_addr));
+    }
+    println!("  API        {}", http_base(&config.native_addr));
+    println!("  API docs   {}/docs", http_base(&config.native_addr));
+    println!("  S3         {}", http_base(&config.s3_addr));
+    println!("  CDN        {}", http_base(&config.cdn_addr));
+    println!();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use clap::Parser;
+    let cli = Cli::parse();
+    if let Some(c) = &cli.config {
+        std::env::set_var("BARME_CONFIG", c);
+    }
+
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
-    let config = barme_config::Config::load()?;
+    let mut config = barme_config::Config::load()?;
+    if let Some(v) = cli.data_dir {
+        config.data_dir = v;
+    }
+    if let Some(v) = cli.native_addr {
+        config.native_addr = v;
+    }
+    if let Some(v) = cli.s3_addr {
+        config.s3_addr = v;
+    }
+    if let Some(v) = cli.cdn_addr {
+        config.cdn_addr = v;
+    }
+    if let Some(v) = cli.console_addr {
+        config.console_addr = v;
+    }
+    print_banner(&config, cfg!(feature = "ui"));
 
     let policy = Policy {
         codec: config.default_policy.codec.clone(),
