@@ -47,5 +47,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/${{ matrix.asset }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           fail_on_unmatched_files: true
