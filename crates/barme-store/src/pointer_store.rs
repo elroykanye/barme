@@ -97,6 +97,59 @@ impl PointerStore {
         }
     }
 
+    /// Rename a bucket by moving its directory of pointers. No object data
+    /// moves; the pointers just live under a new name. Refuses to clobber an
+    /// existing bucket.
+    pub fn rename_bucket(&self, old: &str, new: &str) -> Result<()> {
+        let from = self.bucket_dir(old)?;
+        let to = self.bucket_dir(new)?;
+        if !from.exists() {
+            return Ok(());
+        }
+        if to.exists() {
+            return Err(StoreError::BadBucket(format!("{new} already exists")));
+        }
+        std::fs::rename(from, to)?;
+        Ok(())
+    }
+
+    /// Remove a whole bucket's pointers. Chunks become unreachable and are
+    /// reclaimed by GC later.
+    pub fn delete_bucket(&self, bucket: &str) -> Result<()> {
+        match std::fs::remove_dir_all(self.bucket_dir(bucket)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Point a new key at the current version of another key. Chunks are shared,
+    /// so this is a pointer write, not a data copy. Returns false if the source
+    /// has no current version.
+    pub fn copy(&self, from_b: &str, from_k: &str, to_b: &str, to_k: &str) -> Result<bool> {
+        let Some(current) = self.current(from_b, from_k)? else {
+            return Ok(false);
+        };
+        self.set(to_b, to_k, &current)?;
+        Ok(true)
+    }
+
+    /// Move a key, preserving its full version history, then drop the original.
+    pub fn move_key(&self, from_b: &str, from_k: &str, to_b: &str, to_k: &str) -> Result<bool> {
+        let history = self.history(from_b, from_k)?;
+        if history.is_empty() {
+            return Ok(false);
+        }
+        let mut contents = String::new();
+        for h in &history {
+            contents.push_str(&h.to_string());
+            contents.push('\n');
+        }
+        write_atomic(&self.path(to_b, to_k)?, contents.as_bytes())?;
+        self.remove(from_b, from_k)?;
+        Ok(true)
+    }
+
     fn bucket_dir(&self, bucket: &str) -> Result<PathBuf> {
         if bucket.is_empty()
             || bucket == "."

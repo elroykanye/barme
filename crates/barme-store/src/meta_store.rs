@@ -28,6 +28,24 @@ impl MetaStore {
         write_atomic(&self.path(bucket), &serde_json::to_vec(config)?)
     }
 
+    /// Carry a bucket's config over to a new name.
+    pub fn rename_bucket(&self, old: &str, new: &str) -> Result<()> {
+        let from = self.path(old);
+        if from.exists() {
+            std::fs::rename(from, self.path(new))?;
+        }
+        Ok(())
+    }
+
+    /// Forget a bucket's config.
+    pub fn delete_bucket(&self, bucket: &str) -> Result<()> {
+        match std::fs::remove_file(self.path(bucket)) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     // Hex-encode the bucket name into a single filename, same trick the pointer
     // store uses for keys, so odd bucket names can't escape the directory.
     fn path(&self, bucket: &str) -> PathBuf {

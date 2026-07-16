@@ -219,6 +219,33 @@ impl Engine {
         Ok(self.bucket_config(bucket)?.public_read)
     }
 
+    /// Rename a bucket (pointers + config). No object data moves.
+    pub fn rename_bucket(&self, old: &str, new: &str) -> Result<()> {
+        self.store.pointers.rename_bucket(old, new)?;
+        self.store.meta.rename_bucket(old, new)?;
+        Ok(())
+    }
+
+    /// Delete a bucket and all its pointers. Chunks are reclaimed by GC.
+    pub fn delete_bucket(&self, bucket: &str) -> Result<()> {
+        self.store.pointers.delete_bucket(bucket)?;
+        self.store.meta.delete_bucket(bucket)?;
+        Ok(())
+    }
+
+    /// Move an object to a new bucket/key, keeping its version history. Returns
+    /// false if the source doesn't exist.
+    pub fn move_object(&self, fb: &str, fk: &str, tb: &str, tk: &str) -> Result<bool> {
+        Ok(self.store.pointers.move_key(fb, fk, tb, tk)?)
+    }
+
+    /// Copy an object's current version to a new bucket/key. Chunks are shared,
+    /// so this costs a pointer, not the bytes. Returns false if the source
+    /// doesn't exist.
+    pub fn copy_object(&self, fb: &str, fk: &str, tb: &str, tk: &str) -> Result<bool> {
+        Ok(self.store.pointers.copy(fb, fk, tb, tk)?)
+    }
+
     fn read_manifest_bytes(&self, object_id: &Hash) -> Result<Vec<u8>> {
         let manifest = self
             .store

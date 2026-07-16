@@ -15,7 +15,7 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Json, Router,
 };
 use barme_auth::{authorize, Action, Credentials, Principal};
@@ -70,8 +70,12 @@ impl IntoResponse for NativeError {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/buckets", get(list_buckets))
+        .route("/buckets/{bucket}", delete(delete_bucket))
+        .route("/buckets/{bucket}/rename", post(rename_bucket))
         .route("/buckets/{bucket}/visibility", post(set_visibility))
         .route("/buckets/{bucket}/objects", get(list_objects))
+        .route("/ops/copy", post(copy_object))
+        .route("/ops/move", post(move_object))
         .route("/objects/{bucket}/{*key}", get(download).put(upload).delete(remove))
         .route("/history/{bucket}/{*key}", get(history))
         .route("/manifest/{bucket}/{*key}", get(manifest))
@@ -205,6 +209,64 @@ async fn set_visibility(
         },
     )?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct RenameBucket {
+    new_name: String,
+}
+
+async fn rename_bucket(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RenameBucket>,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    st.engine.rename_bucket(&bucket, &body.new_name)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_bucket(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    st.engine.delete_bucket(&bucket)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct MoveCopy {
+    from_bucket: String,
+    from_key: String,
+    to_bucket: String,
+    to_key: String,
+}
+
+async fn copy_object(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(m): Json<MoveCopy>,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    let ok = st
+        .engine
+        .copy_object(&m.from_bucket, &m.from_key, &m.to_bucket, &m.to_key)?;
+    Ok((if ok { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }).into_response())
+}
+
+async fn move_object(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(m): Json<MoveCopy>,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    let ok = st
+        .engine
+        .move_object(&m.from_bucket, &m.from_key, &m.to_bucket, &m.to_key)?;
+    Ok((if ok { StatusCode::NO_CONTENT } else { StatusCode::NOT_FOUND }).into_response())
 }
 
 // ---- object CRUD ---------------------------------------------------------
