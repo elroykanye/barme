@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 barme-core.workspace = true
 zstd.workspace = true
+thiserror.workspace = true
 # jpeg-xl and avif bindings come later, when the image route lands.
