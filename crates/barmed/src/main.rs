@@ -136,6 +136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
+                if let Err(e) = engine.enforce_lifecycle(now) {
+                    tracing::warn!("lifecycle pass failed: {e}");
+                }
                 match engine.gc_sweep(now, grace) {
                     Ok(s) if s.condemned > 0 || s.erased > 0 => {
                         tracing::info!(

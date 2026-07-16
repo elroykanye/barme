@@ -308,6 +308,36 @@ impl Engine {
         Ok(self.store.pointers.copy(fb, fk, tb, tk)?)
     }
 
+    /// Apply per-pot lifecycle rules: expire objects older than the pot's
+    /// `expire_after_days`, and trim each key to `max_versions`. `now_secs` is
+    /// injected so the caller owns the clock.
+    pub fn enforce_lifecycle(&self, now_secs: u64) -> Result<()> {
+        for pot in self.store.pointers.buckets()? {
+            let cfg = self.store.meta.config(&pot)?;
+            let max_versions = cfg.max_versions.unwrap_or(0);
+            let expire_days = cfg.expire_after_days.unwrap_or(0);
+            if max_versions == 0 && expire_days == 0 {
+                continue;
+            }
+            for key in self.store.pointers.list(&pot)? {
+                if expire_days > 0 {
+                    if let Some(m) = self.manifest(&pot, &key)? {
+                        if let Some(created) = parse_rfc3339_secs(&m.created_at) {
+                            if now_secs.saturating_sub(created) > (expire_days as u64) * 86_400 {
+                                self.store.pointers.remove(&pot, &key)?;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if max_versions > 0 {
+                    self.store.pointers.trim(&pot, &key, max_versions as usize)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Run one garbage-collection sweep. `now_secs` is injected so the caller
     /// owns the clock; `grace` is how long a chunk stays condemned before it's
     /// erased. Returns what the pass did.
@@ -393,4 +423,11 @@ fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_default()
+}
+
+fn parse_rfc3339_secs(s: &str) -> Option<u64> {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::parse(s, &Rfc3339)
+        .ok()
+        .map(|t| t.unix_timestamp().max(0) as u64)
 }

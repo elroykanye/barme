@@ -134,6 +134,24 @@ impl PointerStore {
         Ok(true)
     }
 
+    /// Keep only the most recent `keep` versions of a key. No-op if `keep` is 0
+    /// or the history is already short enough.
+    pub fn trim(&self, bucket: &str, key: &str, keep: usize) -> Result<()> {
+        if keep == 0 {
+            return Ok(());
+        }
+        let history = self.history(bucket, key)?;
+        if history.len() <= keep {
+            return Ok(());
+        }
+        let mut contents = String::new();
+        for h in &history[history.len() - keep..] {
+            contents.push_str(&h.to_string());
+            contents.push('\n');
+        }
+        write_atomic(&self.path(bucket, key)?, contents.as_bytes())
+    }
+
     /// Move a key, preserving its full version history, then drop the original.
     pub fn move_key(&self, from_b: &str, from_k: &str, to_b: &str, to_k: &str) -> Result<bool> {
         let history = self.history(from_b, from_k)?;
