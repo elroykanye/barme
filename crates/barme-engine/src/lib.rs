@@ -192,6 +192,16 @@ impl Engine {
         Ok(self.store.pointers.remove(bucket, key)?)
     }
 
+    /// Buckets that currently hold at least one key.
+    pub fn buckets(&self) -> Result<Vec<String>> {
+        Ok(self.store.pointers.buckets()?)
+    }
+
+    /// Keys currently present in a bucket.
+    pub fn keys(&self, bucket: &str) -> Result<Vec<String>> {
+        Ok(self.store.pointers.list(bucket)?)
+    }
+
     fn read_manifest_bytes(&self, object_id: &Hash) -> Result<Vec<u8>> {
         let manifest = self
             .store

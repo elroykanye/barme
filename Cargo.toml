@@ -19,6 +19,7 @@ barme-engine = { path = "crates/barme-engine" }
 barme-s3 = { path = "crates/barme-s3" }
 barme-native = { path = "crates/barme-native" }
 barme-semantic = { path = "crates/barme-semantic" }
+barme-console = { path = "crates/barme-console" }
 
 blake3 = "1"
 fastcdc = "3"
