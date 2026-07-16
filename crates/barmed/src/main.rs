@@ -9,7 +9,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use barme_console::ConsoleState;
 use barme_engine::{Engine, Policy, WriteEvent};
 use barme_native::AppState;
 use barme_semantic::{HttpEmbedder, MemoryIndex, Semantic};
@@ -61,16 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3_addr: SocketAddr = "0.0.0.0:9000".parse()?;
     let native_addr: SocketAddr = "0.0.0.0:7373".parse()?;
-    let console_addr: SocketAddr = "0.0.0.0:7374".parse()?;
-    tracing::info!(
-        "barmed: S3 on {s3_addr}, native on {native_addr}, console on {console_addr}"
-    );
+    tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}");
 
     let native_state = AppState {
-        engine: engine.clone(),
-        semantic: semantic.clone(),
-    };
-    let console_state = ConsoleState {
         engine: engine.clone(),
         semantic,
     };
@@ -78,7 +70,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::try_join!(
         barme_s3::serve(engine.clone(), s3_addr),
         barme_native::serve(native_state, native_addr),
-        barme_console::serve(console_state, console_addr),
     )?;
     Ok(())
 }
