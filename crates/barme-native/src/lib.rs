@@ -85,6 +85,9 @@ pub fn app(state: AppState) -> Router {
         .route("/content/{hash}", get(content))
         .route("/search", post(search))
         .route("/sync", post(not_yet))
+        // Allow large uploads; the whole body is buffered for now (streaming
+        // multipart lands later).
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

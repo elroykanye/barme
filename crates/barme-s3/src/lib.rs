@@ -60,6 +60,7 @@ pub fn app(state: S3State) -> Router {
         .route("/{bucket}/{*key}", delete(delete_object))
         // HEAD shares the GET route in axum; register it explicitly for clarity.
         .route("/{bucket}/{*key}", axum::routing::head(head_object))
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state)
 }

@@ -1,8 +1,12 @@
 // Thin client for the barme native API. Auth is Basic (owner access/secret),
 // held in localStorage since this console runs on the owner's own machine.
 
-const BASE = import.meta.env.VITE_BARME_API ?? "http://localhost:7373";
-const CDN = import.meta.env.VITE_BARME_CDN ?? "http://localhost:7375";
+// Default to the host the console was loaded from, so opening it over a LAN/WSL
+// IP still reaches the API and CDN on the same host (not the browser's own
+// localhost). Override with VITE_BARME_API / VITE_BARME_CDN at build time.
+const HOST = typeof window !== "undefined" ? window.location.hostname || "localhost" : "localhost";
+const BASE = import.meta.env.VITE_BARME_API ?? `http://${HOST}:7373`;
+const CDN = import.meta.env.VITE_BARME_CDN ?? `http://${HOST}:7375`;
 
 export type Creds = { access: string; secret: string };
 
