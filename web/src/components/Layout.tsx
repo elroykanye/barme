@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Outlet, useNavigate, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Database, LogOut, Moon, Plus, Search, Sun } from "lucide-react";
+import { Database, LogOut, Moon, Plus, Search, Settings, Sun } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useDialogs } from "@/lib/dialogs";
@@ -101,6 +101,13 @@ export function Layout() {
             <kbd className="ml-6 rounded bg-elevated px-1.5 py-0.5 font-mono text-[11px]">⌘K</kbd>
           </button>
           <div className="flex items-center gap-3 text-sm">
+            <Link
+              to="/settings"
+              className="text-muted transition-colors hover:text-text"
+              title="Settings"
+            >
+              <Settings className="size-4" />
+            </Link>
             <button
               onClick={toggleTheme}
               className="text-muted transition-colors hover:text-text"

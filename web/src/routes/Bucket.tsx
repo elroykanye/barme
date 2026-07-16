@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Copy,
@@ -10,6 +10,7 @@ import {
   Lock,
   Pencil,
   Search,
+  Settings,
   Trash2,
   Upload,
   X,
@@ -137,6 +138,11 @@ export function BucketView() {
                 {info.public_read ? "Make private" : "Make public"}
               </Button>
             )}
+            <Link to={`/p/${encodeURIComponent(bucket)}/settings`}>
+              <Button variant="ghost" title="Pot settings">
+                <Settings className="size-4" />
+              </Button>
+            </Link>
             <Button variant="ghost" onClick={renameBucket} title="Rename pot">
               <Pencil className="size-4" />
             </Button>

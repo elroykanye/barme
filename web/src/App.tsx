@@ -7,6 +7,8 @@ import { Layout } from "@/components/Layout";
 import { Login } from "@/routes/Login";
 import { Home } from "@/routes/Home";
 import { BucketView } from "@/routes/Bucket";
+import { PotSettings } from "@/routes/PotSettings";
+import { Settings } from "@/routes/Settings";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
@@ -19,7 +21,9 @@ function Gate() {
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Home />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="/p/:bucket" element={<BucketView />} />
+        <Route path="/p/:bucket/settings" element={<PotSettings />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

@@ -47,6 +47,30 @@ export interface SearchHit {
   score: number;
 }
 
+export interface PotConfig {
+  public_read: boolean;
+  codec: string | null;
+  zstd_level: number | null;
+  fidelity: string | null;
+  route_by_content_type: boolean;
+  max_versions: number | null;
+  expire_after_days: number | null;
+}
+
+export interface KeyInfo {
+  access_key: string;
+  read_only: boolean;
+  pots: string[];
+  created_at: string;
+}
+
+export interface NewKey {
+  access_key: string;
+  secret_key: string;
+  read_only: boolean;
+  pots: string[];
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -167,6 +191,34 @@ export const api = {
 
   async copyObject(fromB: string, fromK: string, toB: string, toK: string): Promise<void> {
     await ops("/ops/copy", fromB, fromK, toB, toK);
+  },
+
+  async getPotConfig(pot: string): Promise<PotConfig> {
+    return (await req(`/pots/${encodeURIComponent(pot)}/config`)).json();
+  },
+
+  async setPotConfig(pot: string, cfg: PotConfig): Promise<void> {
+    await req(`/pots/${encodeURIComponent(pot)}/config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+    });
+  },
+
+  async listKeys(): Promise<KeyInfo[]> {
+    return (await req("/keys")).json();
+  },
+
+  async createKey(key: NewKey): Promise<void> {
+    await req("/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(key),
+    });
+  },
+
+  async deleteKey(access: string): Promise<void> {
+    await req(`/keys/${encodeURIComponent(access)}`, { method: "DELETE" });
   },
 };
 
