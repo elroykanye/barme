@@ -273,9 +273,7 @@ mod tests {
     }
 
     fn creds() -> Credentials {
-        Credentials {
-            keys: HashMap::from([(ACCESS.to_string(), SECRET.to_string())]),
-        }
+        Credentials::single(ACCESS, SECRET)
     }
 
     /// Build a real S3-style signed request using our own (now trusted) signer,

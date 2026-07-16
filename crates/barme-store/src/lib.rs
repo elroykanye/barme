@@ -10,11 +10,13 @@
 //! know a just-written chunk is never garbage even before anything points at it.
 
 mod chunk_store;
+mod key_store;
 mod manifest_store;
 mod meta_store;
 mod pointer_store;
 
 pub use chunk_store::ChunkStore;
+pub use key_store::KeyStore;
 pub use manifest_store::ManifestStore;
 pub use meta_store::MetaStore;
 pub use pointer_store::PointerStore;
@@ -47,6 +49,7 @@ pub struct Store {
     pub manifests: ManifestStore,
     pub pointers: PointerStore,
     pub meta: MetaStore,
+    pub keys: KeyStore,
 }
 
 impl Store {
@@ -57,6 +60,7 @@ impl Store {
             manifests: ManifestStore::open(root.join("manifests"))?,
             pointers: PointerStore::open(root.join("pointers"))?,
             meta: MetaStore::open(root.join("meta"))?,
+            keys: KeyStore::open(root.join("keys"))?,
         })
     }
 }

@@ -39,7 +39,7 @@ impl Principal {
     }
 }
 
-/// What a request wants to do. Read is GET/HEAD/list; the rest are owner-only.
+/// What a request wants to do. Read is GET/HEAD/list; the rest need write access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Read,
@@ -48,43 +48,60 @@ pub enum Action {
     Admin,
 }
 
-/// The owner's declared credentials: access key -> secret key.
+use barme_core::KeyRecord;
+
+/// The set of valid access keys, looked up during request verification.
 #[derive(Debug, Clone, Default)]
 pub struct Credentials {
-    keys: HashMap<String, String>,
+    keys: HashMap<String, KeyRecord>,
 }
 
 impl Credentials {
-    /// Read a single credential from BARME_ACCESS_KEY / BARME_SECRET_KEY.
-    /// Returns None when either is unset, meaning auth is not configured.
-    pub fn from_env() -> Option<Self> {
-        let access = std::env::var("BARME_ACCESS_KEY").ok()?;
-        let secret = std::env::var("BARME_SECRET_KEY").ok()?;
-        if access.is_empty() || secret.is_empty() {
-            return None;
+    /// Build from the stored key records.
+    pub fn from_records(records: impl IntoIterator<Item = KeyRecord>) -> Self {
+        Credentials {
+            keys: records
+                .into_iter()
+                .map(|r| (r.access_key.clone(), r))
+                .collect(),
         }
-        let mut keys = HashMap::new();
-        keys.insert(access, secret);
-        Some(Credentials { keys })
     }
 
-    /// Build credentials from a single access-key/secret pair.
+    /// A single full-owner credential (used in tests and simple setups).
     pub fn single(access_key: impl Into<String>, secret_key: impl Into<String>) -> Self {
-        let mut keys = HashMap::new();
-        keys.insert(access_key.into(), secret_key.into());
-        Credentials { keys }
+        Self::from_records([KeyRecord {
+            access_key: access_key.into(),
+            secret_key: secret_key.into(),
+            read_only: false,
+            pots: vec![],
+            created_at: String::new(),
+        }])
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
     pub fn secret(&self, access_key: &str) -> Option<&str> {
-        self.keys.get(access_key).map(String::as_str)
+        self.keys.get(access_key).map(|r| r.secret_key.as_str())
+    }
+
+    pub fn record(&self, access_key: &str) -> Option<&KeyRecord> {
+        self.keys.get(access_key)
     }
 }
 
-/// The one authorization rule. `public_read` is the target bucket's flag.
-pub fn authorize(principal: &Principal, action: Action, public_read: bool) -> bool {
-    match principal {
-        Principal::Owner(_) => true,
-        Principal::Anonymous => action == Action::Read && public_read,
+/// The authorization rule. `record` is the authenticated key (None = anonymous);
+/// `pot` is the target pot; `public` is that pot's read flag.
+pub fn authorize(record: Option<&KeyRecord>, action: Action, pot: &str, public: bool) -> bool {
+    match record {
+        Some(k) => {
+            if k.read_only && action != Action::Read {
+                return false;
+            }
+            k.scoped_to(pot)
+        }
+        None => action == Action::Read && public,
     }
 }
 
@@ -92,20 +109,44 @@ pub fn authorize(principal: &Principal, action: Action, public_read: bool) -> bo
 mod tests {
     use super::*;
 
-    #[test]
-    fn owner_can_do_anything() {
-        let p = Principal::Owner("k".into());
-        for action in [Action::Read, Action::Write, Action::Delete, Action::Admin] {
-            assert!(authorize(&p, action, false));
+    fn owner() -> KeyRecord {
+        KeyRecord {
+            access_key: "o".into(),
+            secret_key: "s".into(),
+            read_only: false,
+            pots: vec![],
+            created_at: String::new(),
         }
     }
 
     #[test]
-    fn anonymous_reads_only_public_buckets() {
-        let p = Principal::Anonymous;
-        assert!(authorize(&p, Action::Read, true));
-        assert!(!authorize(&p, Action::Read, false));
-        assert!(!authorize(&p, Action::Write, true));
-        assert!(!authorize(&p, Action::Delete, true));
+    fn owner_can_do_anything() {
+        let k = owner();
+        for action in [Action::Read, Action::Write, Action::Delete, Action::Admin] {
+            assert!(authorize(Some(&k), action, "any", false));
+        }
+    }
+
+    #[test]
+    fn read_only_key_cannot_write() {
+        let mut k = owner();
+        k.read_only = true;
+        assert!(authorize(Some(&k), Action::Read, "any", false));
+        assert!(!authorize(Some(&k), Action::Write, "any", false));
+    }
+
+    #[test]
+    fn scoped_key_limited_to_its_pots() {
+        let mut k = owner();
+        k.pots = vec!["photos".into()];
+        assert!(authorize(Some(&k), Action::Write, "photos", false));
+        assert!(!authorize(Some(&k), Action::Write, "videos", false));
+    }
+
+    #[test]
+    fn anonymous_reads_only_public() {
+        assert!(authorize(None, Action::Read, "p", true));
+        assert!(!authorize(None, Action::Read, "p", false));
+        assert!(!authorize(None, Action::Write, "p", true));
     }
 }

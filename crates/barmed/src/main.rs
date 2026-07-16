@@ -9,7 +9,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use barme_auth::Credentials;
 use barme_engine::{Engine, Policy, WriteEvent};
 use barme_native::AppState;
 use barme_s3::S3State;
@@ -114,13 +113,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = Arc::new(engine);
 
-    let creds = config
-        .credentials
-        .as_ref()
-        .map(|c| Arc::new(Credentials::single(&c.access_key, &c.secret_key)));
-    match &creds {
-        Some(_) => tracing::info!("credentials loaded; auth enforced"),
-        None => tracing::warn!("no credentials set; running open"),
+    // Seed the configured owner key on first run, then report the key count.
+    if let Some(c) = &config.credentials {
+        engine.ensure_owner(&c.access_key, &c.secret_key)?;
+    }
+    match engine.list_keys() {
+        Ok(k) if !k.is_empty() => tracing::info!("{} access key(s); auth enforced", k.len()),
+        _ => tracing::warn!("no access keys; running open"),
     }
 
     // Periodic garbage collection. Without this, deleted objects' chunks are
@@ -160,12 +159,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3_state = S3State {
         engine: engine.clone(),
-        creds: creds.clone(),
     };
     let native_state = AppState {
         engine: engine.clone(),
         semantic,
-        creds,
     };
 
     let s3 = barme_s3::serve(s3_state, s3_addr);

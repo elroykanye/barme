@@ -18,8 +18,8 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use barme_auth::{authorize, Action, Credentials, Principal};
-use barme_core::{BucketConfig, Hash};
+use barme_auth::{authorize, Action, Credentials};
+use barme_core::{BucketConfig, Hash, KeyRecord};
 use barme_engine::{Engine, EngineError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,6 @@ const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub semantic: Option<Arc<barme_semantic::Semantic>>,
-    pub creds: Option<Arc<Credentials>>,
 }
 
 enum NativeError {
@@ -70,6 +69,8 @@ impl IntoResponse for NativeError {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/stats", get(stats))
+        .route("/keys", get(list_keys).post(create_key))
+        .route("/keys/{access}", delete(delete_key))
         .route("/pots", get(list_buckets))
         .route("/pots/{bucket}", delete(delete_bucket))
         .route("/pots/{bucket}/rename", post(rename_bucket))
@@ -95,46 +96,59 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
 
 // ---- auth helpers --------------------------------------------------------
 
-/// Resolve who is calling from a Basic Authorization header. With no
-/// credentials configured, every caller is the owner (open mode).
-fn principal(state: &AppState, headers: &HeaderMap) -> Principal {
-    let Some(creds) = &state.creds else {
-        return Principal::Owner("open".into());
-    };
-    let Some(raw) = headers
+/// A resolved caller for one request. `open` means no keys are configured
+/// (auth disabled); otherwise `record` is the authenticated key, if any.
+struct Caller {
+    open: bool,
+    record: Option<KeyRecord>,
+}
+
+fn caller(state: &AppState, headers: &HeaderMap) -> Caller {
+    let keys = state.engine.list_keys().unwrap_or_default();
+    if keys.is_empty() {
+        return Caller { open: true, record: None };
+    }
+    let creds = Credentials::from_records(keys);
+    let record = basic(headers).and_then(|(access, secret)| match creds.record(&access) {
+        Some(r) if r.secret_key == secret => Some(r.clone()),
+        _ => None,
+    });
+    Caller { open: false, record }
+}
+
+fn basic(headers: &HeaderMap) -> Option<(String, String)> {
+    let raw = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Basic "))
         .and_then(|b64| STANDARD.decode(b64.trim()).ok())
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-    else {
-        return Principal::Anonymous;
-    };
-    let Some((access, secret)) = raw.split_once(':') else {
-        return Principal::Anonymous;
-    };
-    match creds.secret(access) {
-        Some(known) if known == secret => Principal::Owner(access.to_string()),
-        _ => Principal::Anonymous,
-    }
+        .and_then(|bytes| String::from_utf8(bytes).ok())?;
+    let (access, secret) = raw.split_once(':')?;
+    Some((access.to_string(), secret.to_string()))
 }
 
-/// Owner-only gate.
-fn require_owner(p: &Principal) -> Result<(), NativeError> {
-    if p.is_owner() {
-        Ok(())
-    } else {
-        Err(NativeError::Forbidden)
+impl Caller {
+    fn require_owner(&self) -> Result<(), NativeError> {
+        if self.open || self.record.as_ref().map(|k| k.is_owner()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(NativeError::Forbidden)
+        }
     }
-}
-
-/// Read gate that respects bucket visibility.
-fn require_read(state: &AppState, p: &Principal, bucket: &str) -> Result<(), NativeError> {
-    let public = state.engine.is_public(bucket).unwrap_or(false);
-    if authorize(p, Action::Read, public) {
-        Ok(())
-    } else {
-        Err(NativeError::Forbidden)
+    fn require_write(&self, pot: &str) -> Result<(), NativeError> {
+        if self.open || authorize(self.record.as_ref(), Action::Write, pot, false) {
+            Ok(())
+        } else {
+            Err(NativeError::Forbidden)
+        }
+    }
+    fn require_read(&self, state: &AppState, pot: &str) -> Result<(), NativeError> {
+        let public = state.engine.is_public(pot).unwrap_or(false);
+        if self.open || authorize(self.record.as_ref(), Action::Read, pot, public) {
+            Ok(())
+        } else {
+            Err(NativeError::Forbidden)
+        }
     }
 }
 
@@ -148,15 +162,70 @@ struct BucketInfo {
 }
 
 async fn stats(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     Ok(Json(st.engine.stats()?).into_response())
+}
+
+async fn list_keys(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    // Never return secrets in a listing.
+    let keys: Vec<serde_json::Value> = st
+        .engine
+        .list_keys()?
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "access_key": k.access_key,
+                "read_only": k.read_only,
+                "pots": k.pots,
+                "created_at": k.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(keys).into_response())
+}
+
+#[derive(Deserialize)]
+struct NewKey {
+    access_key: String,
+    secret_key: String,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    pots: Vec<String>,
+}
+
+async fn create_key(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(nk): Json<NewKey>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    st.engine.create_key(&KeyRecord {
+        access_key: nk.access_key,
+        secret_key: nk.secret_key,
+        read_only: nk.read_only,
+        pots: nk.pots,
+        created_at: String::new(),
+    })?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_key(
+    State(st): State<AppState>,
+    Path(access): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    st.engine.delete_key(&access)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn list_buckets(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     let mut out = Vec::new();
     for name in st.engine.buckets()? {
         out.push(BucketInfo {
@@ -180,7 +249,7 @@ async fn list_objects(
     Path(bucket): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_read(&st, &principal(&st, &headers), &bucket)?;
+    caller(&st, &headers).require_read(&st, &bucket)?;
     let mut out = Vec::new();
     for key in st.engine.keys(&bucket)? {
         let size = st
@@ -208,7 +277,7 @@ async fn set_visibility(
     headers: HeaderMap,
     Json(vis): Json<Visibility>,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     st.engine.set_bucket_config(
         &bucket,
         &BucketConfig {
@@ -223,7 +292,7 @@ async fn get_config(
     Path(bucket): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     Ok(Json(st.engine.bucket_config(&bucket)?).into_response())
 }
 
@@ -233,7 +302,7 @@ async fn put_config(
     headers: HeaderMap,
     Json(cfg): Json<BucketConfig>,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     st.engine.set_bucket_config(&bucket, &cfg)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -249,7 +318,7 @@ async fn rename_bucket(
     headers: HeaderMap,
     Json(body): Json<RenameBucket>,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     st.engine.rename_bucket(&bucket, &body.new_name)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -259,7 +328,7 @@ async fn delete_bucket(
     Path(bucket): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     st.engine.delete_bucket(&bucket)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -277,7 +346,7 @@ async fn copy_object(
     headers: HeaderMap,
     Json(m): Json<MoveCopy>,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     let ok = st
         .engine
         .copy_object(&m.from_bucket, &m.from_key, &m.to_bucket, &m.to_key)?;
@@ -289,7 +358,7 @@ async fn move_object(
     headers: HeaderMap,
     Json(m): Json<MoveCopy>,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     let ok = st
         .engine
         .move_object(&m.from_bucket, &m.from_key, &m.to_bucket, &m.to_key)?;
@@ -309,7 +378,7 @@ async fn upload(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_write(&bucket)?;
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -326,7 +395,7 @@ async fn download(
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_read(&st, &principal(&st, &headers), &bucket)?;
+    caller(&st, &headers).require_read(&st, &bucket)?;
     let Some(bytes) = st.engine.get(&bucket, &key)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
@@ -343,7 +412,7 @@ async fn remove(
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_write(&bucket)?;
     st.engine.delete(&bucket, &key)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -355,7 +424,7 @@ async fn history(
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_read(&st, &principal(&st, &headers), &bucket)?;
+    caller(&st, &headers).require_read(&st, &bucket)?;
     let ids: Vec<String> = st
         .engine
         .history(&bucket, &key)?
@@ -370,7 +439,7 @@ async fn manifest(
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
-    require_read(&st, &principal(&st, &headers), &bucket)?;
+    caller(&st, &headers).require_read(&st, &bucket)?;
     match st.engine.manifest(&bucket, &key)? {
         Some(m) => Ok(Json(m).into_response()),
         None => Ok(StatusCode::NOT_FOUND.into_response()),
@@ -383,7 +452,7 @@ async fn content(
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
     // Fetch-by-hash isn't bucket-scoped, so it's owner-only.
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     let Ok(object_id) = hash.parse::<Hash>() else {
         return Ok((StatusCode::BAD_REQUEST, "malformed content hash").into_response());
     };
@@ -415,7 +484,7 @@ async fn search(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, NativeError> {
-    require_owner(&principal(&st, &headers))?;
+    caller(&st, &headers).require_owner()?;
     let Some(semantic) = &st.semantic else {
         return Ok((StatusCode::NOT_IMPLEMENTED, "semantic search not configured").into_response());
     };
@@ -461,14 +530,21 @@ mod tests {
         AppState {
             engine: Arc::new(Engine::open(path, Policy::default()).unwrap()),
             semantic: None,
-            creds: None,
         }
     }
 
-    /// State with one owner credential, so auth is actually enforced.
+    /// State with one owner key, so auth is actually enforced.
     fn state_with_auth() -> (AppState, String) {
-        let mut s = state();
-        s.creds = Some(Arc::new(Credentials::single("owner", "secret")));
+        let s = state();
+        s.engine
+            .create_key(&KeyRecord {
+                access_key: "owner".into(),
+                secret_key: "secret".into(),
+                read_only: false,
+                pots: vec![],
+                created_at: String::new(),
+            })
+            .unwrap();
         let basic = format!("Basic {}", STANDARD.encode("owner:secret"));
         (s, basic)
     }

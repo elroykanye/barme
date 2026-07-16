@@ -244,6 +244,43 @@ impl Engine {
         Ok(self.bucket_config(bucket)?.public_read)
     }
 
+    // ---- access keys ----
+
+    pub fn list_keys(&self) -> Result<Vec<barme_core::KeyRecord>> {
+        Ok(self.store.keys.list()?)
+    }
+
+    pub fn get_key(&self, access_key: &str) -> Result<Option<barme_core::KeyRecord>> {
+        Ok(self.store.keys.get(access_key)?)
+    }
+
+    pub fn create_key(&self, record: &barme_core::KeyRecord) -> Result<()> {
+        let mut r = record.clone();
+        if r.created_at.is_empty() {
+            r.created_at = now_rfc3339();
+        }
+        Ok(self.store.keys.put(&r)?)
+    }
+
+    pub fn delete_key(&self, access_key: &str) -> Result<()> {
+        Ok(self.store.keys.delete(access_key)?)
+    }
+
+    /// Seed a full-owner key if the store has none. Used to bootstrap the
+    /// configured owner credential on first run.
+    pub fn ensure_owner(&self, access_key: &str, secret_key: &str) -> Result<()> {
+        if self.store.keys.list()?.is_empty() {
+            self.store.keys.put(&barme_core::KeyRecord {
+                access_key: access_key.to_string(),
+                secret_key: secret_key.to_string(),
+                read_only: false,
+                pots: vec![],
+                created_at: now_rfc3339(),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Rename a bucket (pointers + config). No object data moves.
     pub fn rename_bucket(&self, old: &str, new: &str) -> Result<()> {
         self.store.pointers.rename_bucket(old, new)?;

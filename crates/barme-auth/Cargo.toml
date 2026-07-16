@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+barme-core.workspace = true
 sha2.workspace = true
 hmac = "0.12"
 hex.workspace = true

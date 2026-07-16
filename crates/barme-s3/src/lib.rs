@@ -23,7 +23,7 @@ use axum::{
     routing::{delete, get, put},
     Router,
 };
-use barme_auth::{authorize, verify_sigv4, Action, Credentials, SignedRequest};
+use barme_auth::{authorize, verify_sigv4, Action, Credentials, Principal, SignedRequest};
 use barme_engine::{Engine, EngineError};
 
 /// S3 clients expect a Content-Type on every write; use this when they omit one.
@@ -45,12 +45,11 @@ impl IntoResponse for S3Error {
     }
 }
 
-/// Shared state. Credentials are optional: with none configured the door runs
-/// open (no auth), which is convenient for local use and dev.
+/// Shared state. Keys are read live from the engine's key store per request; an
+/// empty store means the door runs open (no auth), convenient for local dev.
 #[derive(Clone)]
 pub struct S3State {
     pub engine: Arc<Engine>,
-    pub creds: Option<Arc<Credentials>>,
 }
 
 /// The router, decoupled from any port so tests can drive it directly.
@@ -74,9 +73,11 @@ pub async fn serve(state: S3State, addr: SocketAddr) -> std::io::Result<()> {
 /// Verify the SigV4 signature, then authorize against the bucket's visibility.
 /// With no credentials configured the request passes straight through.
 async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Response {
-    let Some(creds) = &st.creds else {
-        return next.run(req).await;
-    };
+    let keys = st.engine.list_keys().unwrap_or_default();
+    if keys.is_empty() {
+        return next.run(req).await; // open mode: no keys configured
+    }
+    let creds = Credentials::from_records(keys);
 
     let mut headers = std::collections::HashMap::new();
     for (name, value) in req.headers() {
@@ -91,7 +92,7 @@ async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Re
         headers,
     };
 
-    let principal = match verify_sigv4(creds, &signed) {
+    let principal = match verify_sigv4(&creds, &signed) {
         Ok(p) => p,
         Err(_) => return (StatusCode::FORBIDDEN, "invalid signature").into_response(),
     };
@@ -108,8 +109,12 @@ async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Re
         _ => Action::Write,
     };
     let public = st.engine.is_public(bucket).unwrap_or(false);
+    let record = match &principal {
+        Principal::Owner(access) => creds.record(access),
+        Principal::Anonymous => None,
+    };
 
-    if !authorize(&principal, action, public) {
+    if !authorize(record, action, bucket, public) {
         return (StatusCode::FORBIDDEN, "access denied").into_response();
     }
     next.run(req).await
@@ -209,7 +214,6 @@ mod tests {
         let path = dir.keep();
         S3State {
             engine: Arc::new(Engine::open(path, barme_engine::Policy::default()).unwrap()),
-            creds: None,
         }
     }
 
