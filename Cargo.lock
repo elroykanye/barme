@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "barme-auth"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-core",
  "hex",
@@ -131,7 +131,7 @@ dependencies = [
 
 [[package]]
 name = "barme-cdn"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "barme-auth",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "barme-chunk"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-core",
  "fastcdc",
@@ -152,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "barme-codec"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-core",
  "thiserror",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "barme-config"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "barme-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "hex",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "barme-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-chunk",
  "barme-codec",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "barme-gc"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-chunk",
  "barme-core",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "barme-native"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "barme-auth",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "barme-s3"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "barme-auth",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "barme-semantic"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "barme-core",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "barme-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "barme-chunk",
  "barme-core",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "barmed"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "barme-auth",
