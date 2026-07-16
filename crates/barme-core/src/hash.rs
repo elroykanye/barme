@@ -33,6 +33,11 @@ impl Hash {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Bare hex digest, no algorithm prefix. Used for on-disk paths.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
 }
 
 impl fmt::Display for Hash {

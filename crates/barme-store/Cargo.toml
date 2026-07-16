@@ -7,5 +7,9 @@ license.workspace = true
 [dependencies]
 barme-core.workspace = true
 thiserror.workspace = true
-# Backend for the manifest/pointer index is still open (see ARCHITECTURE.md).
-# Chunks land on the filesystem, addressed by hash.
+serde_json.workspace = true
+hex.workspace = true
+tempfile = "3"
+
+[dev-dependencies]
+barme-chunk.workspace = true
