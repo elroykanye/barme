@@ -11,10 +11,12 @@
 
 mod chunk_store;
 mod manifest_store;
+mod meta_store;
 mod pointer_store;
 
 pub use chunk_store::ChunkStore;
 pub use manifest_store::ManifestStore;
+pub use meta_store::MetaStore;
 pub use pointer_store::PointerStore;
 
 use barme_core::Hash;
@@ -44,6 +46,7 @@ pub struct Store {
     pub chunks: ChunkStore,
     pub manifests: ManifestStore,
     pub pointers: PointerStore,
+    pub meta: MetaStore,
 }
 
 impl Store {
@@ -53,6 +56,7 @@ impl Store {
             chunks: ChunkStore::open(root.join("chunks"))?,
             manifests: ManifestStore::open(root.join("manifests"))?,
             pointers: PointerStore::open(root.join("pointers"))?,
+            meta: MetaStore::open(root.join("meta"))?,
         })
     }
 }

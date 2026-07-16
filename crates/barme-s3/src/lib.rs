@@ -16,12 +16,14 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    extract::{Path, Request, State},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, put},
     Router,
 };
+use barme_auth::{authorize, verify_sigv4, Action, Credentials, SignedRequest};
 use barme_engine::{Engine, EngineError};
 
 /// S3 clients expect a Content-Type on every write; use this when they omit one.
@@ -43,25 +45,78 @@ impl IntoResponse for S3Error {
     }
 }
 
+/// Shared state. Credentials are optional: with none configured the door runs
+/// open (no auth), which is convenient for local use and dev.
+#[derive(Clone)]
+pub struct S3State {
+    pub engine: Arc<Engine>,
+    pub creds: Option<Arc<Credentials>>,
+}
+
 /// The router, decoupled from any port so tests can drive it directly.
-pub fn app(engine: Arc<Engine>) -> Router {
+pub fn app(state: S3State) -> Router {
     Router::new()
         .route("/{bucket}/{*key}", put(put_object))
         .route("/{bucket}/{*key}", get(get_object))
         .route("/{bucket}/{*key}", delete(delete_object))
         // HEAD shares the GET route in axum; register it explicitly for clarity.
         .route("/{bucket}/{*key}", axum::routing::head(head_object))
-        .with_state(engine)
+        .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .with_state(state)
 }
 
 /// Bind and serve until the process ends.
-pub async fn serve(engine: Arc<Engine>, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(state: S3State, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(engine)).await
+    axum::serve(listener, app(state)).await
+}
+
+/// Verify the SigV4 signature, then authorize against the bucket's visibility.
+/// With no credentials configured the request passes straight through.
+async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Response {
+    let Some(creds) = &st.creds else {
+        return next.run(req).await;
+    };
+
+    let mut headers = std::collections::HashMap::new();
+    for (name, value) in req.headers() {
+        if let Ok(v) = value.to_str() {
+            headers.insert(name.as_str().to_ascii_lowercase(), v.to_string());
+        }
+    }
+    let signed = SignedRequest {
+        method: req.method().as_str().to_string(),
+        path: req.uri().path().to_string(),
+        query: req.uri().query().unwrap_or("").to_string(),
+        headers,
+    };
+
+    let principal = match verify_sigv4(creds, &signed) {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::FORBIDDEN, "invalid signature").into_response(),
+    };
+
+    let bucket = signed
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let action = match *req.method() {
+        Method::GET | Method::HEAD => Action::Read,
+        Method::DELETE => Action::Delete,
+        _ => Action::Write,
+    };
+    let public = st.engine.is_public(bucket).unwrap_or(false);
+
+    if !authorize(&principal, action, public) {
+        return (StatusCode::FORBIDDEN, "access denied").into_response();
+    }
+    next.run(req).await
 }
 
 async fn put_object(
-    State(engine): State<Arc<Engine>>,
+    State(S3State { engine, .. }): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
@@ -79,7 +134,7 @@ async fn put_object(
 }
 
 async fn get_object(
-    State(engine): State<Arc<Engine>>,
+    State(S3State { engine, .. }): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, S3Error> {
     let Some(bytes) = engine.get(&bucket, &key)? else {
@@ -102,7 +157,7 @@ async fn get_object(
 }
 
 async fn head_object(
-    State(engine): State<Arc<Engine>>,
+    State(S3State { engine, .. }): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, S3Error> {
     let Some(manifest) = engine.manifest(&bucket, &key)? else {
@@ -125,7 +180,7 @@ async fn head_object(
 }
 
 async fn delete_object(
-    State(engine): State<Arc<Engine>>,
+    State(S3State { engine, .. }): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, S3Error> {
     engine.delete(&bucket, &key)?;
@@ -146,16 +201,21 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn engine() -> Arc<Engine> {
+    // Open-mode state (no credentials), so these tests exercise the routes, not
+    // the signing path; SigV4 itself is tested in barme-auth.
+    fn state() -> S3State {
         let dir = tempfile::tempdir().unwrap();
         // Leak the tempdir so the store outlives the test; the OS reclaims it.
         let path = dir.keep();
-        Arc::new(Engine::open(path, barme_engine::Policy::default()).unwrap())
+        S3State {
+            engine: Arc::new(Engine::open(path, barme_engine::Policy::default()).unwrap()),
+            creds: None,
+        }
     }
 
     #[tokio::test]
     async fn put_then_get_round_trips() {
-        let app = app(engine());
+        let app = app(state());
         let body = b"the bytes go in and the same bytes come out";
 
         let res = app
@@ -194,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_unknown_key_is_404() {
-        let app = app(engine());
+        let app = app(state());
         let res = app
             .oneshot(
                 Request::builder()
@@ -210,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn head_reports_length_without_body() {
-        let app = app(engine());
+        let app = app(state());
         let body = b"measure me";
 
         app.clone()
@@ -245,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_then_get_is_404() {
-        let app = app(engine());
+        let app = app(state());
         let body = b"here today";
 
         app.clone()

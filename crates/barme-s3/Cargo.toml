@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 barme-engine.workspace = true
+barme-auth.workspace = true
 axum.workspace = true
 tokio.workspace = true
 

@@ -202,6 +202,23 @@ impl Engine {
         Ok(self.store.pointers.list(bucket)?)
     }
 
+    pub fn bucket_config(&self, bucket: &str) -> Result<barme_core::BucketConfig> {
+        Ok(self.store.meta.config(bucket)?)
+    }
+
+    pub fn set_bucket_config(
+        &self,
+        bucket: &str,
+        config: &barme_core::BucketConfig,
+    ) -> Result<()> {
+        Ok(self.store.meta.set_config(bucket, config)?)
+    }
+
+    /// Whether a bucket allows anonymous reads.
+    pub fn is_public(&self, bucket: &str) -> Result<bool> {
+        Ok(self.bucket_config(bucket)?.public_read)
+    }
+
     fn read_manifest_bytes(&self, object_id: &Hash) -> Result<Vec<u8>> {
         let manifest = self
             .store

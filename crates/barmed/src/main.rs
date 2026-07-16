@@ -9,8 +9,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use barme_auth::Credentials;
 use barme_engine::{Engine, Policy, WriteEvent};
 use barme_native::AppState;
+use barme_s3::S3State;
 use barme_semantic::{HttpEmbedder, MemoryIndex, Semantic};
 
 #[tokio::main]
@@ -58,17 +60,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let engine = Arc::new(engine);
 
+    let creds = Credentials::from_env().map(Arc::new);
+    match &creds {
+        Some(_) => tracing::info!("credentials loaded; auth enforced"),
+        None => tracing::warn!(
+            "no credentials set (BARME_ACCESS_KEY / BARME_SECRET_KEY); running open"
+        ),
+    }
+
     let s3_addr: SocketAddr = "0.0.0.0:9000".parse()?;
     let native_addr: SocketAddr = "0.0.0.0:7373".parse()?;
     tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}");
 
+    let s3_state = S3State {
+        engine: engine.clone(),
+        creds,
+    };
     let native_state = AppState {
         engine: engine.clone(),
         semantic,
     };
 
     tokio::try_join!(
-        barme_s3::serve(engine.clone(), s3_addr),
+        barme_s3::serve(s3_state, s3_addr),
         barme_native::serve(native_state, native_addr),
     )?;
     Ok(())

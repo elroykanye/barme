@@ -170,6 +170,7 @@ name = "barme-s3"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "barme-auth",
  "barme-engine",
  "http-body-util",
  "tempfile",
@@ -207,6 +208,7 @@ dependencies = [
 name = "barmed"
 version = "0.0.0"
 dependencies = [
+ "barme-auth",
  "barme-engine",
  "barme-native",
  "barme-s3",
