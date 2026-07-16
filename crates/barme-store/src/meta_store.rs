@@ -72,7 +72,14 @@ mod tests {
     #[test]
     fn set_then_read_back() {
         let (_d, s) = store();
-        s.set_config("photos", &BucketConfig { public_read: true }).unwrap();
+        s.set_config(
+            "photos",
+            &BucketConfig {
+                public_read: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(s.config("photos").unwrap().public_read);
         // A different bucket is unaffected.
         assert!(!s.config("private").unwrap().public_read);

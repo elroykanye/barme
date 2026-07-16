@@ -278,12 +278,10 @@ async fn set_visibility(
     Json(vis): Json<Visibility>,
 ) -> Result<Response, NativeError> {
     caller(&st, &headers).require_owner()?;
-    st.engine.set_bucket_config(
-        &bucket,
-        &BucketConfig {
-            public_read: vis.public_read,
-        },
-    )?;
+    // Preserve the rest of the pot's config; only flip visibility.
+    let mut cfg = st.engine.bucket_config(&bucket)?;
+    cfg.public_read = vis.public_read;
+    st.engine.set_bucket_config(&bucket, &cfg)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -596,7 +594,13 @@ mod tests {
         let (st, _basic) = state_with_auth();
         st.engine.put("open", "k", b"hi", "text/plain").unwrap();
         st.engine
-            .set_bucket_config("open", &BucketConfig { public_read: true })
+            .set_bucket_config(
+                "open",
+                &BucketConfig {
+                    public_read: true,
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let res = send(
