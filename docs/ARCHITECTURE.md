@@ -123,7 +123,7 @@ If chunks were cut at fixed 5 MB offsets, editing the start would shift every la
 
 Set per bucket, recorded per object. Two routes, picked by content type, because whole-file image codecs and content-defined chunking pull in opposite directions.
 
-- **Blob route** (backups, documents, archives, unknown types): chunk with FastCDC, compress chunks with zstd, dedup at the chunk level.
+- **Blob route** (backups, documents, archives, unknown types): chunk with FastCDC on the original bytes, compress each chunk on its own, dedup at the chunk level. A stored chunk is addressed by the hash of its compressed bytes, which keeps the chunk store a pure self-verifying blob store. Whole-object integrity is a separate SHA-256 of the original recorded in the manifest and checked on read.
 - **Image route** (photos, media): treat the file as a whole, apply an image codec, dedup at the file level.
 
 Fidelity tiers:

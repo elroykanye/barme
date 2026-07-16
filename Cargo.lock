@@ -85,6 +85,7 @@ name = "barme-codec"
 version = "0.0.0"
 dependencies = [
  "barme-core",
+ "thiserror",
  "zstd",
 ]
 
