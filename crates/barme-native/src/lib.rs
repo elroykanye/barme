@@ -3,12 +3,11 @@
 //!   GET  /history/{bucket}/{*key}   version graph, oldest first
 //!   GET  /manifest/{bucket}/{*key}  how the current version was stored
 //!   GET  /content/{hash}            fetch any object directly by its id
+//!   POST /search                    semantic retrieval (if configured)
 //!   POST /sync                      tree reconciliation (not yet)
-//!   POST /search                    semantic retrieval (not yet)
 //!
-//! Runs on its own port beside the S3 door, over the same engine, so an object
-//! written over S3 can be introspected and diffed here. Paths put the fixed
-//! segment first so a wildcard key can't swallow the `/history` suffix.
+//! Runs on its own port beside the S3 door, over the same engine. Paths put the
+//! fixed segment first so a wildcard key can't swallow the `/history` suffix.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,44 +22,83 @@ use axum::{
 };
 use barme_core::Hash;
 use barme_engine::{Engine, EngineError};
+use barme_semantic::{Semantic, SemanticError};
+use serde::Deserialize;
 
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
-struct NativeError(EngineError);
+/// Shared handler state. Semantic is optional: without it, `/search` reports
+/// that it isn't configured rather than failing.
+#[derive(Clone)]
+pub struct AppState {
+    pub engine: Arc<Engine>,
+    pub semantic: Option<Arc<Semantic>>,
+}
+
+enum NativeError {
+    Engine(EngineError),
+    Semantic(SemanticError),
+}
 
 impl From<EngineError> for NativeError {
     fn from(e: EngineError) -> Self {
-        NativeError(e)
+        NativeError::Engine(e)
+    }
+}
+
+impl From<SemanticError> for NativeError {
+    fn from(e: SemanticError) -> Self {
+        NativeError::Semantic(e)
     }
 }
 
 impl IntoResponse for NativeError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+        let msg = match self {
+            NativeError::Engine(e) => e.to_string(),
+            NativeError::Semantic(e) => e.to_string(),
+        };
+        (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
     }
 }
 
+/// Router without a semantic layer wired. `/search` will report unconfigured.
 pub fn app(engine: Arc<Engine>) -> Router {
+    router(AppState {
+        engine,
+        semantic: None,
+    })
+}
+
+/// Router with semantic search enabled.
+pub fn app_with_semantic(engine: Arc<Engine>, semantic: Arc<Semantic>) -> Router {
+    router(AppState {
+        engine,
+        semantic: Some(semantic),
+    })
+}
+
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/history/{bucket}/{*key}", get(history))
         .route("/manifest/{bucket}/{*key}", get(manifest))
         .route("/content/{hash}", get(content))
+        .route("/search", post(search))
         .route("/sync", post(not_yet))
-        .route("/search", post(not_yet))
-        .with_state(engine)
+        .with_state(state)
 }
 
-pub async fn serve(engine: Arc<Engine>, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(state: AppState, addr: SocketAddr) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app(engine)).await
+    axum::serve(listener, router(state)).await
 }
 
-/// Every version a key has pointed at, oldest first, as object-id strings.
 async fn history(
-    State(engine): State<Arc<Engine>>,
+    State(st): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, NativeError> {
-    let ids: Vec<String> = engine
+    let ids: Vec<String> = st
+        .engine
         .history(&bucket, &key)?
         .iter()
         .map(|h| h.to_string())
@@ -68,30 +106,28 @@ async fn history(
     Ok(Json(ids).into_response())
 }
 
-/// The manifest of the current version: codec, fidelity, chunks, quality.
 async fn manifest(
-    State(engine): State<Arc<Engine>>,
+    State(st): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, NativeError> {
-    match engine.manifest(&bucket, &key)? {
+    match st.engine.manifest(&bucket, &key)? {
         Some(m) => Ok(Json(m).into_response()),
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
 }
 
-/// Fetch an object by its content address, regardless of what key points at it.
 async fn content(
-    State(engine): State<Arc<Engine>>,
+    State(st): State<AppState>,
     Path(hash): Path<String>,
 ) -> Result<Response, NativeError> {
     let Ok(object_id) = hash.parse::<Hash>() else {
         return Ok((StatusCode::BAD_REQUEST, "malformed content hash").into_response());
     };
-    let Some(manifest) = engine.object_manifest(&object_id)? else {
+    let Some(manifest) = st.engine.object_manifest(&object_id)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
 
-    let bytes = engine.read_object(&object_id)?;
+    let bytes = st.engine.read_object(&object_id)?;
     let mut out = HeaderMap::new();
     out.insert(
         header::CONTENT_TYPE,
@@ -102,8 +138,43 @@ async fn content(
     Ok((StatusCode::OK, out, bytes).into_response())
 }
 
-/// Placeholder for sync and search. Declared so the shape is visible; the
-/// bodies land with the replication and semantic layers.
+fn default_k() -> usize {
+    10
+}
+
+fn default_tenant() -> String {
+    "default".to_string()
+}
+
+#[derive(Deserialize)]
+struct SearchRequest {
+    query: String,
+    #[serde(default = "default_k")]
+    k: usize,
+    #[serde(default = "default_tenant")]
+    tenant: String,
+}
+
+/// Embed the query text and return the nearest objects. The semantic check runs
+/// before the body is parsed so an unconfigured instance answers 501 cleanly.
+async fn search(State(st): State<AppState>, body: Bytes) -> Result<Response, NativeError> {
+    let Some(semantic) = &st.semantic else {
+        return Ok((StatusCode::NOT_IMPLEMENTED, "semantic search not configured").into_response());
+    };
+    let Ok(req) = serde_json::from_slice::<SearchRequest>(&body) else {
+        return Ok((StatusCode::BAD_REQUEST, "expected {query, k?, tenant?}").into_response());
+    };
+
+    let hits = semantic
+        .search(&req.tenant, req.query.as_bytes(), "text/plain", req.k)
+        .await?;
+    let out: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|m| serde_json::json!({ "id": m.id.to_string(), "score": m.score }))
+        .collect();
+    Ok(Json(out).into_response())
+}
+
 async fn not_yet(_body: Bytes) -> Response {
     (StatusCode::NOT_IMPLEMENTED, "not implemented yet").into_response()
 }
@@ -153,7 +224,10 @@ mod tests {
         let m: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(m["storage"]["codec"], "zstd");
 
-        assert_eq!(get(app(e), "/manifest/b/ghost").await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            get(app(e), "/manifest/b/ghost").await.status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -183,11 +257,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_and_search_are_not_implemented() {
+    async fn search_without_semantic_is_501() {
         let e = engine();
         for path in ["/sync", "/search"] {
             let res = app(e.clone())
-                .oneshot(Request::builder().method("POST").uri(path).body(Body::empty()).unwrap())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::NOT_IMPLEMENTED);

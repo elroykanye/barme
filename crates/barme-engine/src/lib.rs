@@ -20,6 +20,18 @@ use barme_core::{
 use barme_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::Arc;
+
+/// Emitted after a successful write, for anything that wants to react to new
+/// objects (the semantic layer, mostly). Handed to the write hook by value.
+pub struct WriteEvent {
+    pub object_id: Hash,
+    pub tenant: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
+type WriteHook = Arc<dyn Fn(WriteEvent) + Send + Sync>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -65,6 +77,7 @@ impl Default for Policy {
 pub struct Engine {
     store: Store,
     policy: Policy,
+    write_hook: Option<WriteHook>,
 }
 
 impl Engine {
@@ -72,7 +85,18 @@ impl Engine {
         Ok(Engine {
             store: Store::open(root)?,
             policy,
+            write_hook: None,
         })
+    }
+
+    /// Register a hook to run after every successful write. Set it before the
+    /// engine is shared. The hook must be cheap and non-blocking; the intended
+    /// use is to drop the event on a queue for a background worker.
+    pub fn set_write_hook<F>(&mut self, hook: F)
+    where
+        F: Fn(WriteEvent) + Send + Sync + 'static,
+    {
+        self.write_hook = Some(Arc::new(hook));
     }
 
     /// Write an object and return its object_id. Prior versions of the same
@@ -116,6 +140,15 @@ impl Engine {
 
         let object_id = self.store.manifests.put(&manifest)?;
         self.store.pointers.set(bucket, key, &object_id)?;
+
+        if let Some(hook) = &self.write_hook {
+            hook(WriteEvent {
+                object_id,
+                tenant: self.policy.tenant.clone(),
+                content_type: content_type.to_string(),
+                bytes: data.to_vec(),
+            });
+        }
         Ok(object_id)
     }
 

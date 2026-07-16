@@ -12,6 +12,7 @@ path = "src/main.rs"
 barme-engine.workspace = true
 barme-s3.workspace = true
 barme-native.workspace = true
+barme-semantic.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
