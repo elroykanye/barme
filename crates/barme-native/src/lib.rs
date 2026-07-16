@@ -69,6 +69,7 @@ impl IntoResponse for NativeError {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/stats", get(stats))
         .route("/buckets", get(list_buckets))
         .route("/buckets/{bucket}", delete(delete_bucket))
         .route("/buckets/{bucket}/rename", post(rename_bucket))
@@ -143,6 +144,11 @@ struct BucketInfo {
     name: String,
     public_read: bool,
     objects: usize,
+}
+
+async fn stats(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    Ok(Json(st.engine.stats()?).into_response())
 }
 
 async fn list_buckets(

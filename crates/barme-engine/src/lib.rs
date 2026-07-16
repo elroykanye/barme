@@ -52,6 +52,16 @@ pub enum EngineError {
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
+/// Storage-wide statistics. See [`Engine::stats`].
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Stats {
+    pub buckets: usize,
+    pub objects: usize,
+    pub logical_bytes: u64,
+    pub physical_bytes: u64,
+    pub unique_chunks: usize,
+}
+
 /// How new objects get written. Per-bucket policy lives on top of this later;
 /// for now it's one policy per engine.
 #[derive(Debug, Clone)]
@@ -244,6 +254,30 @@ impl Engine {
     /// doesn't exist.
     pub fn copy_object(&self, fb: &str, fk: &str, tb: &str, tk: &str) -> Result<bool> {
         Ok(self.store.pointers.copy(fb, fk, tb, tk)?)
+    }
+
+    /// Storage-wide statistics. `logical_bytes` is what users think they stored
+    /// (sum of current object sizes); `physical_bytes` is what's actually on
+    /// disk after dedup and compression. The gap is the win.
+    pub fn stats(&self) -> Result<Stats> {
+        let buckets = self.store.pointers.buckets()?;
+        let mut objects = 0usize;
+        let mut logical_bytes = 0u64;
+        for b in &buckets {
+            for k in self.keys(b)? {
+                if let Some(m) = self.manifest(b, &k)? {
+                    objects += 1;
+                    logical_bytes += m.original.size_bytes;
+                }
+            }
+        }
+        Ok(Stats {
+            buckets: buckets.len(),
+            objects,
+            logical_bytes,
+            physical_bytes: self.store.chunks.physical_bytes()?,
+            unique_chunks: self.store.chunks.count()?,
+        })
     }
 
     fn read_manifest_bytes(&self, object_id: &Hash) -> Result<Vec<u8>> {

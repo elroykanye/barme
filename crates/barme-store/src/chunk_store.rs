@@ -88,6 +88,32 @@ impl ChunkStore {
         Ok(out)
     }
 
+    /// Total bytes of all stored chunks on disk: the real, deduplicated,
+    /// compressed footprint. Walks the shard dirs summing file sizes.
+    pub fn physical_bytes(&self) -> Result<u64> {
+        let shards = match std::fs::read_dir(&self.root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let mut total = 0u64;
+        for shard in shards {
+            let shard = shard?;
+            if !shard.file_type()?.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(shard.path())? {
+                total += entry?.metadata()?.len();
+            }
+        }
+        Ok(total)
+    }
+
+    /// How many unique chunks are stored.
+    pub fn count(&self) -> Result<usize> {
+        Ok(self.all()?.len())
+    }
+
     /// The condemned set: chunk -> unix-seconds it was first condemned. GC reads
     /// it whole, mutates in memory, and writes it back with `save_condemned`.
     pub fn load_condemned(&self) -> Result<HashMap<Hash, u64>> {
