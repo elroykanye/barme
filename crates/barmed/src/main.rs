@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Arc::new(engine);
 
     let s3_addr: SocketAddr = "0.0.0.0:9000".parse()?;
-    let native_addr: SocketAddr = "0.0.0.0:9001".parse()?;
+    let native_addr: SocketAddr = "0.0.0.0:7373".parse()?;
     tracing::info!("barmed: S3 door on {s3_addr}, native door on {native_addr}");
 
     let native_state = AppState {
