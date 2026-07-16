@@ -92,15 +92,15 @@ export const api = {
   base: BASE,
 
   async listBuckets(): Promise<BucketInfo[]> {
-    return (await req("/buckets")).json();
+    return (await req("/pots")).json();
   },
 
   async listObjects(bucket: string): Promise<ObjectInfo[]> {
-    return (await req(`/buckets/${encodeURIComponent(bucket)}/objects`)).json();
+    return (await req(`/pots/${encodeURIComponent(bucket)}/objects`)).json();
   },
 
   async setVisibility(bucket: string, publicRead: boolean): Promise<void> {
-    await req(`/buckets/${encodeURIComponent(bucket)}/visibility`, {
+    await req(`/pots/${encodeURIComponent(bucket)}/visibility`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ public_read: publicRead }),
@@ -150,7 +150,7 @@ export const api = {
   },
 
   async renameBucket(bucket: string, newName: string): Promise<void> {
-    await req(`/buckets/${encodeURIComponent(bucket)}/rename`, {
+    await req(`/pots/${encodeURIComponent(bucket)}/rename`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ new_name: newName }),
@@ -158,7 +158,7 @@ export const api = {
   },
 
   async deleteBucket(bucket: string): Promise<void> {
-    await req(`/buckets/${encodeURIComponent(bucket)}`, { method: "DELETE" });
+    await req(`/pots/${encodeURIComponent(bucket)}`, { method: "DELETE" });
   },
 
   async moveObject(fromB: string, fromK: string, toB: string, toK: string): Promise<void> {

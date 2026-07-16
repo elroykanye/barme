@@ -70,11 +70,11 @@ impl IntoResponse for NativeError {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/stats", get(stats))
-        .route("/buckets", get(list_buckets))
-        .route("/buckets/{bucket}", delete(delete_bucket))
-        .route("/buckets/{bucket}/rename", post(rename_bucket))
-        .route("/buckets/{bucket}/visibility", post(set_visibility))
-        .route("/buckets/{bucket}/objects", get(list_objects))
+        .route("/pots", get(list_buckets))
+        .route("/pots/{bucket}", delete(delete_bucket))
+        .route("/pots/{bucket}/rename", post(rename_bucket))
+        .route("/pots/{bucket}/visibility", post(set_visibility))
+        .route("/pots/{bucket}/objects", get(list_objects))
         .route("/ops/copy", post(copy_object))
         .route("/ops/move", post(move_object))
         .route("/objects/{bucket}/{*key}", get(download).put(upload).delete(remove))
@@ -462,7 +462,7 @@ mod tests {
         st.engine.put("b", "k", b"hi", "text/plain").unwrap();
         let res = send(
             app(st),
-            Request::builder().uri("/buckets").body(Body::empty()).unwrap(),
+            Request::builder().uri("/pots").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -473,7 +473,7 @@ mod tests {
         let (st, _basic) = state_with_auth();
         let res = send(
             app(st),
-            Request::builder().uri("/buckets").body(Body::empty()).unwrap(),
+            Request::builder().uri("/pots").body(Body::empty()).unwrap(),
         )
         .await;
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -485,7 +485,7 @@ mod tests {
         let res = send(
             app(st),
             Request::builder()
-                .uri("/buckets")
+                .uri("/pots")
                 .header(header::AUTHORIZATION, basic)
                 .body(Body::empty())
                 .unwrap(),
@@ -538,7 +538,7 @@ mod tests {
             app(st.clone()),
             Request::builder()
                 .method("POST")
-                .uri("/buckets/b/visibility")
+                .uri("/pots/b/visibility")
                 .header(header::AUTHORIZATION, &basic)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"public_read":true}"#))
