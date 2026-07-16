@@ -136,7 +136,7 @@ async fn bucket_view(
     Ok(page(
         &format!("barme / {bucket}"),
         html! {
-            p { a href="/" { "← all buckets" } }
+            p.crumb { a href="/" { "← all buckets" } }
             h2 { (bucket) }
             @if rows.is_empty() {
                 p.muted { "empty bucket." }
@@ -177,12 +177,14 @@ async fn object_view(
     Ok(page(
         &format!("barme / {bucket} / {key}"),
         html! {
-            p { a href=(format!("/b/{}", enc(&bucket))) { "← " (bucket) } }
+            p.crumb { a href=(format!("/b/{}", enc(&bucket))) { "← " (bucket) } }
             h2 { (key) }
 
             div.badges {
                 span.badge { (format!("{:?}", m.storage.route).to_lowercase()) }
-                span.badge { (format!("{:?}", m.storage.fidelity).to_lowercase()) }
+                span class={ "badge badge--" (format!("{:?}", m.storage.fidelity).to_lowercase()) } {
+                    (format!("{:?}", m.storage.fidelity).to_lowercase())
+                }
                 span.badge { "codec: " (m.storage.codec) }
                 @if let Some(score) = m.quality.score {
                     span.badge { "quality: " (format!("{score:.3}")) }
@@ -238,7 +240,7 @@ async fn search(
     Ok(page(
         "barme / search",
         html! {
-            p { a href="/" { "← home" } }
+            p.crumb { a href="/" { "← home" } }
             (search_form(&st, &q))
             @if unconfigured {
                 p.muted { "semantic search isn't configured (set BARME_EMBED_URL on the server)." }
@@ -353,15 +355,24 @@ async fn download_by_hash(
 fn page(title: &str, body: Markup) -> Html<String> {
     let markup = html! {
         (DOCTYPE)
-        html {
+        html lang="en" {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
+                link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍲</text></svg>";
                 style { (PreEscaped(CSS)) }
             }
             body {
-                header { a.brand href="/" { "barme" } }
+                header {
+                    div.bar {
+                        a.brand href="/" {
+                            span.dot {}
+                            "barme"
+                        }
+                        span.tag { "object store" }
+                    }
+                }
                 main { (body) }
             }
         }
@@ -377,8 +388,10 @@ fn search_form(st: &ConsoleState, q: &str) -> Markup {
                 p.muted { "not configured; set BARME_EMBED_URL on the server to enable." }
             }
             form method="get" action="/search" {
-                input name="q" value=(q) placeholder="search by meaning";
-                button { "search" }
+                div.search-row {
+                    input name="q" value=(q) placeholder="search by meaning";
+                    button { "search" }
+                }
             }
         }
     }
@@ -422,26 +435,134 @@ fn human(n: u64) -> String {
 }
 
 const CSS: &str = r#"
-:root { color-scheme: light dark; }
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1a1d24;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+  --accent: #6d5efc;
+  --accent-ink: #ffffff;
+  --ok: #0f9d58;
+  --ok-bg: #e6f4ea;
+  --warn: #b26a00;
+  --warn-bg: #fdf0d5;
+  --danger: #dc2626;
+  --shadow: 0 1px 2px rgba(16,18,27,.06), 0 4px 16px rgba(16,18,27,.05);
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0f14;
+    --surface: #161922;
+    --text: #e7e9ee;
+    --muted: #8b93a5;
+    --border: #262b36;
+    --accent: #8b7dff;
+    --ok: #4ade80; --ok-bg: #10331f;
+    --warn: #fbbf24; --warn-bg: #3a2c08;
+    --danger: #f87171;
+    --shadow: none;
+  }
+}
 * { box-sizing: border-box; }
-body { font: 15px/1.5 system-ui, sans-serif; margin: 0; }
-header { padding: 12px 20px; border-bottom: 1px solid #8883; }
-.brand { font-weight: 700; letter-spacing: .5px; text-decoration: none; color: inherit; }
-main { max-width: 900px; margin: 0 auto; padding: 20px; }
-section { margin: 0 0 28px; }
-h2 { font-size: 1.1rem; margin: 0 0 10px; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+header {
+  position: sticky; top: 0; z-index: 5;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: saturate(1.6) blur(8px);
+  border-bottom: 1px solid var(--border);
+}
+.bar {
+  max-width: 940px; margin: 0 auto; padding: 14px 22px;
+  display: flex; align-items: baseline; gap: 12px;
+}
+.brand {
+  color: var(--text); font-weight: 700; font-size: 1.15rem;
+  letter-spacing: -.02em; display: inline-flex; align-items: center; gap: 8px;
+}
+.brand:hover { text-decoration: none; }
+.dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), #c084fc);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.tag { color: var(--muted); font-size: .82rem; }
+
+main { max-width: 940px; margin: 0 auto; padding: 28px 22px 60px; }
+
+section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 22px;
+  margin: 0 0 20px;
+}
+h2 { font-size: .95rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+h3 { font-size: 1rem; margin: 24px 0 10px; }
+
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #8882; vertical-align: top; }
-th { font-weight: 600; }
-code { font-family: ui-monospace, monospace; font-size: .85em; word-break: break-all; }
-a { color: #3b82f6; }
-.muted { color: #8889; }
-label { display: block; margin: 6px 0; }
-input { padding: 6px 8px; font: inherit; }
-button { padding: 6px 14px; font: inherit; cursor: pointer; margin-top: 8px; }
-button.danger { color: #ef4444; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
+tbody tr:last-child td, tr:last-child td { border-bottom: none; }
+table a { font-weight: 500; }
+td:not(:first-child), th:not(:first-child) { color: var(--muted); }
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: .82em; word-break: break-all;
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  padding: 1px 5px; border-radius: 5px;
+}
+
+.muted { color: var(--muted); }
+
+label { display: block; margin: 0 0 12px; font-size: .88rem; color: var(--muted); }
+input {
+  display: block; width: 100%; margin-top: 5px;
+  padding: 9px 11px; font: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+input[type=file] { padding: 7px; }
+input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+
+button {
+  padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink);
+  border: none; border-radius: 8px; margin-top: 4px;
+}
+button:hover { filter: brightness(1.06); }
+button.danger { background: transparent; color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border)); }
+button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); filter: none; }
 form.inline { display: inline; }
-.badges { margin: 8px 0 16px; }
-.badge { display: inline-block; padding: 2px 8px; margin-right: 6px; border: 1px solid #8884; border-radius: 4px; font-size: .8rem; }
-.versions li { margin: 4px 0; }
+
+.search-row { display: flex; gap: 8px; }
+.search-row input { margin-top: 0; }
+.search-row button { margin-top: 0; white-space: nowrap; }
+
+.badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 18px; }
+.badge {
+  display: inline-flex; align-items: center;
+  padding: 3px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600;
+  background: color-mix(in srgb, var(--text) 7%, transparent); color: var(--text);
+}
+.badge--exact { background: var(--ok-bg); color: var(--ok); }
+.badge--perceptual { background: var(--warn-bg); color: var(--warn); }
+
+ol.versions { padding-left: 20px; }
+.versions li { margin: 6px 0; }
+
+.crumb { margin: -4px 0 18px; font-size: .9rem; }
 "#;
