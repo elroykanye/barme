@@ -49,6 +49,34 @@ export interface Manifest {
 export interface SearchHit {
   id: string;
   score: number;
+  pot?: string;
+  key?: string;
+}
+
+export interface ObjectMeta {
+  tags: Record<string, string>;
+  note: string;
+  favorite: boolean;
+  locked_until: string | null;
+}
+
+export interface DiffResult {
+  added: string[];
+  removed: string[];
+  shared: string[];
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+}
+
+export interface Health {
+  objects: number;
+  pots: number;
+  unique_chunks: number;
+  uptime_secs: number;
 }
 
 export interface PotConfig {
@@ -224,7 +252,139 @@ export const api = {
   async deleteKey(access: string): Promise<void> {
     await req(`/keys/${encodeURIComponent(access)}`, { method: "DELETE" });
   },
+
+  // --- Phase 2: object metadata, versions, integrity, sharing ---
+
+  async getMeta(bucket: string, key: string): Promise<ObjectMeta> {
+    return (await req(`/meta/${encodeURIComponent(bucket)}/${encodeKey(key)}`)).json();
+  },
+
+  async setMeta(bucket: string, key: string, meta: ObjectMeta): Promise<void> {
+    await req(`/meta/${encodeURIComponent(bucket)}/${encodeKey(key)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(meta),
+    });
+  },
+
+  async restore(bucket: string, key: string, objectId: string): Promise<void> {
+    await req(`/restore/${encodeURIComponent(bucket)}/${encodeKey(key)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ object_id: objectId }),
+    });
+  },
+
+  async diff(bucket: string, key: string, a: string, b: string): Promise<DiffResult> {
+    const p = new URLSearchParams({ a, b }).toString();
+    return (await req(`/diff/${encodeURIComponent(bucket)}/${encodeKey(key)}?${p}`)).json();
+  },
+
+  async verify(bucket: string, key: string): Promise<{ ok: boolean }> {
+    return (
+      await req(`/verify/${encodeURIComponent(bucket)}/${encodeKey(key)}`, {
+        method: "POST",
+      })
+    ).json();
+  },
+
+  async presign(bucket: string, key: string, expiresSecs: number): Promise<{ url: string }> {
+    return (
+      await req(`/presign/${encodeURIComponent(bucket)}/${encodeKey(key)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expires_secs: expiresSecs }),
+      })
+    ).json();
+  },
+
+  // --- Phase 3: import, zip ---
+
+  async importUrl(bucket: string, url: string, key: string): Promise<{ object_id: string }> {
+    return (
+      await req(`/pots/${encodeURIComponent(bucket)}/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, key }),
+      })
+    ).json();
+  },
+
+  async zip(bucket: string, keys: string[]): Promise<Blob> {
+    const q = keys.map(encodeURIComponent).join(",");
+    return (await req(`/pots/${encodeURIComponent(bucket)}/zip?keys=${q}`)).blob();
+  },
+
+  // --- Phase 5: similarity ---
+
+  async similar(hash: string): Promise<SearchHit[]> {
+    const res = await req(`/similar/${encodeURIComponent(hash)}`, { method: "POST" });
+    return res.status === 501 ? [] : res.json();
+  },
+
+  // --- Phase 6: webhooks, health ---
+
+  async listWebhooks(): Promise<Webhook[]> {
+    return (await req("/webhooks")).json();
+  },
+
+  async saveWebhook(url: string, events: string[]): Promise<Webhook> {
+    return (
+      await req("/webhooks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, events }),
+      })
+    ).json();
+  },
+
+  async deleteWebhook(id: string): Promise<void> {
+    await req(`/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  async health(): Promise<Health> {
+    return (await req("/health")).json();
+  },
 };
+
+export interface UploadHandle {
+  promise: Promise<{ object_id: string }>;
+  cancel: () => void;
+}
+
+/** XHR-based upload exposing real progress + cancel, unlike fetch. */
+export function uploadWithProgress(
+  bucket: string,
+  key: string,
+  file: File,
+  onProgress: (loaded: number, total: number) => void,
+): UploadHandle {
+  const xhr = new XMLHttpRequest();
+  const promise = new Promise<{ object_id: string }>((resolve, reject) => {
+    xhr.open("PUT", BASE + `/objects/${encodeURIComponent(bucket)}/${encodeKey(key)}`);
+    const c = loadCreds();
+    if (c) xhr.setRequestHeader("Authorization", "Basic " + btoa(`${c.access}:${c.secret}`));
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as { object_id: string });
+        } catch {
+          resolve({ object_id: "" });
+        }
+      } else {
+        reject(new ApiError(xhr.status, xhr.responseText || xhr.statusText));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network error"));
+    xhr.onabort = () => reject(new ApiError(0, "aborted"));
+    xhr.send(file);
+  });
+  return { promise, cancel: () => xhr.abort() };
+}
 
 async function ops(path: string, fromB: string, fromK: string, toB: string, toK: string) {
   await req(path, {

@@ -12,18 +12,20 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use barme_auth::{authorize, Action, Credentials};
-use barme_core::{BucketConfig, Hash, KeyRecord};
+use barme_core::{Annotation, BucketConfig, Hash, KeyRecord, Webhook};
 use barme_engine::{Engine, EngineError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use std::io::Write as _;
+use std::time::Instant;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -31,6 +33,11 @@ const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub semantic: Option<Arc<barme_semantic::Semantic>>,
+    /// Public base URL of the CDN door, e.g. `http://localhost:7375`, used to
+    /// build presigned share links.
+    pub cdn_base: String,
+    /// When the process came up, for the health uptime reading.
+    pub started: Instant,
 }
 
 enum NativeError {
@@ -53,6 +60,9 @@ impl From<barme_semantic::SemanticError> for NativeError {
 impl IntoResponse for NativeError {
     fn into_response(self) -> Response {
         match self {
+            NativeError::Engine(e @ EngineError::Locked(..)) => {
+                (StatusCode::CONFLICT, e.to_string()).into_response()
+            }
             NativeError::Engine(e) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
@@ -68,27 +78,44 @@ impl IntoResponse for NativeError {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/stats", get(stats))
         .route("/keys", get(list_keys).post(create_key))
         .route("/keys/{access}", delete(delete_key))
+        .route("/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/webhooks/{id}", delete(delete_webhook))
         .route("/pots", get(list_buckets))
         .route("/pots/{bucket}", delete(delete_bucket))
         .route("/pots/{bucket}/rename", post(rename_bucket))
         .route("/pots/{bucket}/visibility", post(set_visibility))
         .route("/pots/{bucket}/config", get(get_config).put(put_config))
         .route("/pots/{bucket}/objects", get(list_objects))
+        .route("/pots/{bucket}/import", post(import))
+        .route("/pots/{bucket}/zip", get(zip_objects))
         .route("/ops/copy", post(copy_object))
         .route("/ops/move", post(move_object))
         .route("/objects/{bucket}/{*key}", get(download).put(upload).delete(remove))
         .route("/history/{bucket}/{*key}", get(history))
         .route("/manifest/{bucket}/{*key}", get(manifest))
+        // Object sub-resources use a prefix rather than `/objects/.../meta`:
+        // axum's catch-all `{*key}` must be the last path segment, so a suffix
+        // after it can't be routed. Same prefix style as `/history` and
+        // `/manifest` above.
+        .route("/meta/{bucket}/{*key}", get(get_meta).put(put_meta))
+        .route("/restore/{bucket}/{*key}", post(restore))
+        .route("/diff/{bucket}/{*key}", get(diff))
+        .route("/verify/{bucket}/{*key}", post(verify))
+        .route("/presign/{bucket}/{*key}", post(presign))
         .route("/content/{hash}", get(content))
         .route("/search", post(search))
+        .route("/similar/{hash}", post(similar))
         .route("/sync", post(not_yet))
         // Allow large uploads; the whole body is buffered for now (streaming
         // multipart lands later).
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -495,11 +522,316 @@ async fn search(
     let hits = semantic
         .search(&req.tenant, req.query.as_bytes(), "text/plain", req.k)
         .await?;
-    let out: Vec<serde_json::Value> = hits
-        .iter()
-        .map(|m| serde_json::json!({ "id": m.id.to_string(), "score": m.score }))
-        .collect();
-    Ok(Json(out).into_response())
+    Ok(Json(enrich(&st, &hits)).into_response())
+}
+
+/// Objects semantically similar to a stored one. Embeds the object's bytes via
+/// the configured proxy and queries the index. Owner-only, like fetch-by-hash.
+async fn similar(
+    State(st): State<AppState>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let Some(semantic) = &st.semantic else {
+        return Ok((StatusCode::NOT_IMPLEMENTED, "semantic search not configured").into_response());
+    };
+    let Ok(object_id) = hash.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed content hash").into_response());
+    };
+    let Some(m) = st.engine.object_manifest(&object_id)? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let bytes = st.engine.read_object(&object_id)?;
+    let hits = semantic
+        .search(&m.tenant, &bytes, &m.original.content_type, default_k())
+        .await?;
+    Ok(Json(enrich(&st, &hits)).into_response())
+}
+
+/// Turn raw semantic hits into result rows, resolving each id back to its first
+/// known pot/key via the reverse index (null when the location is unknown).
+fn enrich(st: &AppState, hits: &[barme_semantic::Match]) -> Vec<serde_json::Value> {
+    hits.iter()
+        .map(|m| {
+            let loc = st
+                .engine
+                .locations(&m.id)
+                .ok()
+                .and_then(|v| v.into_iter().next());
+            serde_json::json!({
+                "id": m.id.to_string(),
+                "score": m.score,
+                "pot": loc.as_ref().map(|(p, _)| p.clone()),
+                "key": loc.as_ref().map(|(_, k)| k.clone()),
+            })
+        })
+        .collect()
+}
+
+// ---- annotations, versions, integrity -----------------------------------
+
+async fn get_meta(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    Ok(Json(st.engine.annotation(&bucket, &key)?).into_response())
+}
+
+async fn put_meta(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(annotation): Json<Annotation>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_write(&bucket)?;
+    st.engine.set_annotation(&bucket, &key, &annotation)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct RestoreRequest {
+    object_id: String,
+}
+
+async fn restore(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<RestoreRequest>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_write(&bucket)?;
+    let Ok(object_id) = req.object_id.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed object_id").into_response());
+    };
+    st.engine.restore_version(&bucket, &key, &object_id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    a: String,
+    b: String,
+}
+
+async fn diff(
+    State(st): State<AppState>,
+    Path((bucket, _key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<DiffQuery>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    let (Ok(a), Ok(b)) = (q.a.parse::<Hash>(), q.b.parse::<Hash>()) else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed a or b object_id").into_response());
+    };
+    Ok(Json(st.engine.diff(&a, &b)?).into_response())
+}
+
+async fn verify(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    let ok = st.engine.verify(&bucket, &key)?;
+    Ok(Json(serde_json::json!({ "ok": ok })).into_response())
+}
+
+#[derive(Deserialize)]
+struct PresignRequest {
+    expires_secs: u64,
+}
+
+async fn presign(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<PresignRequest>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    let Some(secret) = st.engine.signing_secret() else {
+        return Ok((
+            StatusCode::NOT_IMPLEMENTED,
+            "no signing secret (open mode); presigning needs an owner key",
+        )
+            .into_response());
+    };
+    let exp = now_unix() + req.expires_secs;
+    let sig = barme_auth::presign(&secret, &bucket, &key, exp);
+    let url = format!("{}/s/{}/{}?exp={}&sig={}", st.cdn_base, bucket, key, exp, sig);
+    Ok(Json(serde_json::json!({ "url": url })).into_response())
+}
+
+// ---- import + zip --------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ImportRequest {
+    url: String,
+    key: String,
+}
+
+async fn import(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<ImportRequest>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_write(&bucket)?;
+    let resp = match reqwest::get(&req.url).await.and_then(|r| r.error_for_status()) {
+        Ok(r) => r,
+        Err(e) => return Ok((StatusCode::BAD_GATEWAY, format!("fetch failed: {e}")).into_response()),
+    };
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
+        .to_string();
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => return Ok((StatusCode::BAD_GATEWAY, format!("read failed: {e}")).into_response()),
+    };
+    let object_id = st.engine.put(&bucket, &req.key, &bytes, &content_type)?;
+    Ok(Json(Uploaded {
+        object_id: object_id.to_string(),
+    })
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ZipQuery {
+    keys: String,
+}
+
+async fn zip_objects(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Query(q): Query<ZipQuery>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        for key in q.keys.split(',').filter(|k| !k.is_empty()) {
+            let Some(bytes) = st.engine.get(&bucket, key)? else {
+                continue; // skip missing keys rather than fail the whole archive
+            };
+            if zip.start_file(key, opts).is_err() || zip.write_all(&bytes).is_err() {
+                return Ok((StatusCode::INTERNAL_SERVER_ERROR, "zip write failed").into_response());
+            }
+        }
+        if zip.finish().is_err() {
+            return Ok((StatusCode::INTERNAL_SERVER_ERROR, "zip finalize failed").into_response());
+        }
+    }
+    let mut out = HeaderMap::new();
+    out.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    out.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=\"barme.zip\""),
+    );
+    out.insert(header::CONTENT_LENGTH, HeaderValue::from(buf.len()));
+    Ok((StatusCode::OK, out, buf).into_response())
+}
+
+// ---- webhooks ------------------------------------------------------------
+
+async fn list_webhooks(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    Ok(Json(st.engine.list_webhooks()?).into_response())
+}
+
+#[derive(Deserialize)]
+struct NewWebhook {
+    url: String,
+    #[serde(default)]
+    events: Vec<String>,
+}
+
+async fn create_webhook(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(nw): Json<NewWebhook>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    // Id derived from the url and time so it's stable within a call and unique
+    // across them, without pulling in a uuid dependency.
+    let id = Hash::of(format!("{}:{}", nw.url, now_unix()).as_bytes()).to_hex()[..16].to_string();
+    let hook = Webhook {
+        id,
+        url: nw.url,
+        events: nw.events,
+    };
+    st.engine.add_webhook(&hook)?;
+    Ok(Json(hook).into_response())
+}
+
+async fn delete_webhook(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    st.engine.delete_webhook(&id)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---- health + metrics ----------------------------------------------------
+
+/// Liveness and a few headline counts. No auth: safe to expose to a probe.
+async fn health(State(st): State<AppState>) -> Result<Response, NativeError> {
+    let s = st.engine.stats()?;
+    Ok(Json(serde_json::json!({
+        "objects": s.objects,
+        "pots": s.buckets,
+        "unique_chunks": s.unique_chunks,
+        "uptime_secs": st.started.elapsed().as_secs(),
+    }))
+    .into_response())
+}
+
+/// Minimal Prometheus text exposition. Formatted by hand; no client dep.
+async fn metrics(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let s = st.engine.stats()?;
+    let body = format!(
+        "# HELP barme_objects Number of live objects.\n\
+         # TYPE barme_objects gauge\n\
+         barme_objects {}\n\
+         # HELP barme_pots Number of pots holding at least one object.\n\
+         # TYPE barme_pots gauge\n\
+         barme_pots {}\n\
+         # HELP barme_unique_chunks Number of unique stored chunks.\n\
+         # TYPE barme_unique_chunks gauge\n\
+         barme_unique_chunks {}\n\
+         # HELP barme_physical_bytes Deduplicated, compressed bytes on disk.\n\
+         # TYPE barme_physical_bytes gauge\n\
+         barme_physical_bytes {}\n",
+        s.objects, s.buckets, s.unique_chunks, s.physical_bytes
+    );
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    Ok((StatusCode::OK, out, body).into_response())
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn not_yet(_body: Bytes) -> Response {
@@ -531,6 +863,8 @@ mod tests {
         AppState {
             engine: Arc::new(Engine::open(path, Policy::default()).unwrap()),
             semantic: None,
+            cdn_base: "http://localhost:7375".into(),
+            started: Instant::now(),
         }
     }
 

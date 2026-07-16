@@ -14,6 +14,70 @@ use barme_native::AppState;
 use barme_s3::S3State;
 use barme_semantic::{HttpEmbedder, MemoryIndex, Semantic};
 
+/// Fan a write event out to webhooks and the semantic layer. Everything here is
+/// best-effort: a failing hook or embedder is logged, never fatal, and never
+/// blocks the write that produced the event (this runs on a worker task).
+async fn dispatch_event(engine: &Arc<Engine>, semantic: &Option<Arc<Semantic>>, ev: WriteEvent) {
+    // Webhooks: POST a small JSON event to every hook that wants "write".
+    for hook in engine.list_webhooks().unwrap_or_default() {
+        if !hook.wants("write") {
+            continue;
+        }
+        let url = hook.url.clone();
+        let payload = serde_json::json!({
+            "event": "write",
+            "object_id": ev.object_id.to_string(),
+            "pot": ev.bucket,
+            "key": ev.key,
+            "content_type": ev.content_type,
+        });
+        tokio::spawn(async move {
+            if let Err(e) = reqwest::Client::new().post(&url).json(&payload).send().await {
+                tracing::warn!("webhook {url} failed: {e}");
+            }
+        });
+    }
+
+    // Semantic understanding + auto-tagging. The embedder may proxy back tags
+    // and text; we store them as annotations on the object, best-effort.
+    if let Some(semantic) = semantic {
+        match semantic
+            .understand(&ev.tenant, ev.object_id, &ev.content_type, &ev.bytes)
+            .await
+        {
+            Ok(u) if !u.tags.is_empty() || u.text.is_some() => {
+                if let Ok(mut ann) = engine.annotation(&ev.bucket, &ev.key) {
+                    for (i, tag) in u.tags.iter().enumerate() {
+                        ann.tags.insert(format!("auto:{i}"), tag.clone());
+                    }
+                    if let Some(text) = u.text {
+                        if ann.note.is_empty() {
+                            ann.note = text;
+                        }
+                    }
+                    if let Err(e) = engine.set_annotation(&ev.bucket, &ev.key, &ann) {
+                        tracing::warn!("auto-tag store failed for {}: {e}", ev.object_id);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("understand failed for {}: {e}", ev.object_id),
+        }
+    }
+}
+
+/// Turn a bind address like `0.0.0.0:7375` into a public base URL. A wildcard
+/// bind host is rewritten to localhost so the link is actually dialable.
+fn http_base(addr: &str) -> String {
+    let (host, port) = addr.rsplit_once(':').unwrap_or(("localhost", "7375"));
+    let host = if host.is_empty() || host == "0.0.0.0" || host == "[::]" {
+        "localhost"
+    } else {
+        host
+    };
+    format!("http://{host}:{port}")
+}
+
 /// The embedded web console, compiled in only under the `ui` feature. The React
 /// build output is baked into the binary and served with an SPA fallback.
 #[cfg(feature = "ui")]
@@ -78,32 +142,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let semantic = match config.embed_url.clone() {
         Some(url) => {
             let model = config.embed_model.clone();
-            let semantic = Arc::new(Semantic::new(
+            tracing::info!("semantic search enabled");
+            Some(Arc::new(Semantic::new(
                 Box::new(HttpEmbedder::new(url, model)),
                 Box::new(MemoryIndex::new()),
-            ));
-
-            // Writes drop an event on this channel; a worker embeds them off the
-            // request path so uploads never wait on the model.
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WriteEvent>();
-            engine.set_write_hook(move |ev| {
-                let _ = tx.send(ev);
-            });
-
-            let worker = semantic.clone();
-            tokio::spawn(async move {
-                while let Some(ev) = rx.recv().await {
-                    if let Err(e) = worker
-                        .understand(&ev.tenant, ev.object_id, &ev.content_type, &ev.bytes)
-                        .await
-                    {
-                        tracing::warn!("understand failed for {}: {e}", ev.object_id);
-                    }
-                }
-            });
-
-            tracing::info!("semantic search enabled");
-            Some(semantic)
+            )))
         }
         None => {
             tracing::info!("semantic search disabled (set embed_url to enable)");
@@ -111,7 +154,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // One event bus for both reactors. Writes drop an event here; a single
+    // background worker fans it out to webhooks and (if configured) the semantic
+    // layer, off the request path so uploads never wait.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WriteEvent>();
+    engine.set_write_hook(move |ev| {
+        let _ = tx.send(ev);
+    });
+
     let engine = Arc::new(engine);
+
+    {
+        let engine = engine.clone();
+        let semantic = semantic.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                dispatch_event(&engine, &semantic, ev).await;
+            }
+        });
+    }
 
     // Seed the configured owner key on first run, then report the key count.
     if let Some(c) = &config.credentials {
@@ -166,6 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let native_state = AppState {
         engine: engine.clone(),
         semantic,
+        cdn_base: http_base(&config.cdn_addr),
+        started: std::time::Instant::now(),
     };
 
     let s3 = barme_s3::serve(s3_state, s3_addr);

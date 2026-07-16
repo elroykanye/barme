@@ -62,6 +62,7 @@ pub fn app(state: S3State) -> Router {
         .route("/{bucket}/{*key}", axum::routing::head(head_object))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }
 

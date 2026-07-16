@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -23,13 +23,16 @@ use axum::{
 };
 use barme_core::Hash;
 use barme_engine::Engine;
-use tower_http::cors::CorsLayer;
+use serde::Deserialize;
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub fn app(engine: Arc<Engine>) -> Router {
     Router::new()
         .route("/cdn/{hash}", get(by_hash))
         .route("/public/{bucket}/{*key}", get(by_key))
+        .route("/s/{bucket}/{*key}", get(by_presign))
         .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
         .with_state(engine)
 }
 
@@ -77,6 +80,49 @@ async fn by_key(
     let etag = quoted(&manifest.object_id.to_string());
 
     // Skip reading the bytes if the client already has this version.
+    if if_none_match(&headers, &etag) {
+        return not_modified(&etag, false);
+    }
+    let bytes = match engine.get(&bucket, &key) {
+        Ok(Some(b)) => b,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    deliver(bytes, &manifest.original.content_type, &etag, false, &headers)
+}
+
+/// Time-limited share delivery. A valid, unexpired presigned signature serves
+/// the object's bytes even from a private pot. The signing secret is the same
+/// one the native door signs links with (the first owner key's secret).
+#[derive(Deserialize)]
+struct Presigned {
+    exp: u64,
+    sig: String,
+}
+
+async fn by_presign(
+    State(engine): State<Arc<Engine>>,
+    Path((bucket, key)): Path<(String, String)>,
+    Query(q): Query<Presigned>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(secret) = engine.signing_secret() else {
+        // Open mode (no owner key): nothing to verify against, so no shares.
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if !barme_auth::verify_presign(&secret, &bucket, &key, q.exp, &q.sig, now) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let manifest = match engine.manifest(&bucket, &key) {
+        Ok(Some(m)) => m,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let etag = quoted(&manifest.object_id.to_string());
     if if_none_match(&headers, &etag) {
         return not_modified(&etag, false);
     }

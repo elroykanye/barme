@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
-import { api, type SearchHit } from "@/lib/api";
+import { CornerDownLeft, Search } from "lucide-react";
+import { api, publicUrl, type SearchHit } from "@/lib/api";
 import { shortHash } from "@/lib/format";
+
+const IMG_RE = /\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i;
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
@@ -34,6 +36,18 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     b.name.toLowerCase().includes(q.toLowerCase()),
   );
 
+  function openHit(h: SearchHit) {
+    if (h.pot && h.key) {
+      navigate(`/p/${encodeURIComponent(h.pot)}?key=${encodeURIComponent(h.key)}`);
+      onClose();
+    }
+  }
+
+  function seeAll() {
+    navigate(`/search?q=${encodeURIComponent(q.trim())}`);
+    onClose();
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[15vh]"
@@ -49,7 +63,10 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
             autoFocus
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Escape" && onClose()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") onClose();
+              if (e.key === "Enter" && q.trim()) seeAll();
+            }}
             placeholder="Search pots, or objects by meaning…"
             className="w-full bg-transparent py-3.5 text-sm outline-none placeholder:text-faint"
           />
@@ -78,14 +95,40 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
             </div>
           )}
           {hits.map((h) => (
-            <div
-              key={h.id}
-              className="flex items-center justify-between rounded-md px-2 py-2 text-sm"
+            <button
+              key={h.id + (h.key ?? "")}
+              onClick={() => openHit(h)}
+              className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left text-sm hover:bg-elevated"
             >
-              <span className="font-mono text-xs text-muted">{shortHash(h.id)}</span>
+              <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded bg-bg">
+                {h.pot && h.key && IMG_RE.test(h.key) ? (
+                  <img
+                    src={publicUrl(h.pot, h.key)}
+                    alt=""
+                    loading="lazy"
+                    className="size-full object-cover"
+                    onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+                  />
+                ) : (
+                  <Search className="size-3.5 text-faint" />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate">{h.key ?? shortHash(h.id)}</span>
+                {h.pot && <span className="block text-[11px] text-faint">{h.pot}</span>}
+              </span>
               <span className="text-xs text-faint">{h.score.toFixed(3)}</span>
-            </div>
+            </button>
           ))}
+
+          {q && !searching && (
+            <button
+              onClick={seeAll}
+              className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs text-muted hover:bg-elevated hover:text-text"
+            >
+              <CornerDownLeft className="size-3.5" /> See all results for “{q.trim()}”
+            </button>
+          )}
 
           {q && !searching && hits.length === 0 && bucketMatches.length === 0 && (
             <p className="px-2 py-3 text-xs text-faint">

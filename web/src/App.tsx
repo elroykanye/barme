@@ -9,6 +9,8 @@ import { Home } from "@/routes/Home";
 import { BucketView } from "@/routes/Bucket";
 import { PotSettings } from "@/routes/PotSettings";
 import { Settings } from "@/routes/Settings";
+import { SearchPage } from "@/routes/Search";
+import { Status } from "@/routes/Status";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
@@ -21,6 +23,8 @@ function Gate() {
     <Routes>
       <Route element={<Layout />}>
         <Route path="/" element={<Home />} />
+        <Route path="/search" element={<SearchPage />} />
+        <Route path="/status" element={<Status />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/p/:bucket" element={<BucketView />} />
         <Route path="/p/:bucket/settings" element={<PotSettings />} />

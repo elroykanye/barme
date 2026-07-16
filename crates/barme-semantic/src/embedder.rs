@@ -9,15 +9,40 @@
 //!   <- { "embedding": [0.1, -0.2, ...] }
 //!
 //! Bytes are base64'd so the same request works for text and binary alike.
+//!
+//! The response may optionally carry `tags` and `text` alongside the embedding.
+//! An endpoint that captions or OCRs an object returns them here; Barme is a
+//! pure proxy and just stores whatever comes back. Endpoints that don't produce
+//! them omit the fields and auto-tagging is silently skipped.
 
 use crate::{Result, SemanticError};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
+/// What an embedder returned for an object: the vector, plus any proxied tags
+/// and free text. Tags/text are best-effort and usually empty.
+#[derive(Debug, Clone, Default)]
+pub struct Enrichment {
+    pub vector: Vec<f32>,
+    pub tags: Vec<String>,
+    pub text: Option<String>,
+}
+
 #[async_trait]
 pub trait Embedder: Send + Sync {
+    /// Just the vector. Used on the query path.
     async fn embed(&self, content_type: &str, bytes: &[u8]) -> Result<Vec<f32>>;
+
+    /// The vector plus any proxied tags/text. Default returns only the vector,
+    /// so an embedder that has no enrichment need not implement this.
+    async fn embed_rich(&self, content_type: &str, bytes: &[u8]) -> Result<Enrichment> {
+        Ok(Enrichment {
+            vector: self.embed(content_type, bytes).await?,
+            tags: Vec::new(),
+            text: None,
+        })
+    }
 }
 
 pub struct HttpEmbedder {
@@ -46,11 +71,14 @@ struct EmbedRequest<'a> {
 #[derive(Deserialize)]
 struct EmbedResponse {
     embedding: Vec<f32>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
-#[async_trait]
-impl Embedder for HttpEmbedder {
-    async fn embed(&self, content_type: &str, bytes: &[u8]) -> Result<Vec<f32>> {
+impl HttpEmbedder {
+    async fn request(&self, content_type: &str, bytes: &[u8]) -> Result<EmbedResponse> {
         let req = EmbedRequest {
             model: &self.model,
             content_type,
@@ -69,6 +97,22 @@ impl Embedder for HttpEmbedder {
         if resp.embedding.is_empty() {
             return Err(SemanticError::EmptyEmbedding);
         }
-        Ok(resp.embedding)
+        Ok(resp)
+    }
+}
+
+#[async_trait]
+impl Embedder for HttpEmbedder {
+    async fn embed(&self, content_type: &str, bytes: &[u8]) -> Result<Vec<f32>> {
+        Ok(self.request(content_type, bytes).await?.embedding)
+    }
+
+    async fn embed_rich(&self, content_type: &str, bytes: &[u8]) -> Result<Enrichment> {
+        let resp = self.request(content_type, bytes).await?;
+        Ok(Enrichment {
+            vector: resp.embedding,
+            tags: resp.tags,
+            text: resp.text,
+        })
     }
 }

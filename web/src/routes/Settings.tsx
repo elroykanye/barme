@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react";
-import { api, type NewKey } from "@/lib/api";
+import { api, type NewKey, type Webhook } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useToast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -9,9 +9,11 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Dialog } from "@/components/ui/dialog";
-import { cn } from "@/lib/cn";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs } from "@/components/ui/tabs";
+import { StatusView } from "@/routes/Status";
 
-const TABS = ["Access keys", "Server"] as const;
+const TABS = ["Access keys", "Webhooks", "Status", "Server"] as const;
 
 export function Settings() {
   const [tab, setTab] = useState<(typeof TABS)[number]>("Access keys");
@@ -20,24 +22,12 @@ export function Settings() {
     <div className="mx-auto h-full max-w-3xl overflow-y-auto p-8">
       <h1 className="mb-5 text-lg font-semibold tracking-tight">Settings</h1>
 
-      <div className="mb-6 flex gap-1 border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={cn(
-              "-mb-px border-b-2 px-3 py-2 text-sm transition-colors",
-              tab === t
-                ? "border-accent text-text"
-                : "border-transparent text-muted hover:text-text",
-            )}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
+      <Tabs tabs={TABS} active={tab} onChange={setTab} className="mb-6" />
 
-      {tab === "Access keys" ? <Keys /> : <Server />}
+      {tab === "Access keys" && <Keys />}
+      {tab === "Webhooks" && <Webhooks />}
+      {tab === "Status" && <StatusView />}
+      {tab === "Server" && <Server />}
     </div>
   );
 }
@@ -229,6 +219,103 @@ function CreateKey({
         <Switch checked={readOnly} onChange={setReadOnly} />
       </div>
     </Dialog>
+  );
+}
+
+const WEBHOOK_EVENTS = ["object.created", "object.deleted"] as const;
+
+function Webhooks() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const hooks = useQuery({ queryKey: ["webhooks"], queryFn: api.listWebhooks });
+  const [url, setUrl] = useState("");
+  const [events, setEvents] = useState<string[]>([...WEBHOOK_EVENTS]);
+
+  const create = useMutation({
+    mutationFn: () => api.saveWebhook(url.trim(), events),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["webhooks"] });
+      setUrl("");
+      toast("Webhook added", "success");
+    },
+    onError: () => toast("Could not add webhook", "error"),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteWebhook(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["webhooks"] }),
+  });
+
+  function toggleEvent(e: string) {
+    setEvents((cur) => (cur.includes(e) ? cur.filter((x) => x !== e) : [...cur, e]));
+  }
+
+  return (
+    <div>
+      <p className="mb-3 text-sm text-muted">
+        POST notifications to your endpoints when objects change.
+      </p>
+
+      <div className="mb-4 rounded-xl border border-border bg-panel p-4">
+        <label className="mb-3 block">
+          <span className="mb-1.5 block text-xs text-muted">Endpoint URL</span>
+          <Input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="https://example.com/hook"
+          />
+        </label>
+        <div className="mb-3 flex flex-wrap gap-4">
+          {WEBHOOK_EVENTS.map((e) => (
+            <label key={e} className="flex items-center gap-2 text-sm text-muted">
+              <Checkbox checked={events.includes(e)} onChange={() => toggleEvent(e)} />
+              {e}
+            </label>
+          ))}
+        </div>
+        <Button onClick={() => create.mutate()} disabled={!url.trim() || !events.length || create.isPending}>
+          <Plus className="size-4" /> Add webhook
+        </Button>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-border">
+        {!hooks.data?.length ? (
+          <div className="p-8 text-center text-sm text-muted">No webhooks yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-faint">
+                <th className="px-4 py-2.5 font-medium">Endpoint</th>
+                <th className="px-4 py-2.5 font-medium">Events</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {hooks.data.map((h: Webhook) => (
+                <tr key={h.id} className="border-b border-border/60 last:border-0">
+                  <td className="px-4 py-2.5 font-mono text-xs">{h.url}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="flex flex-wrap gap-1">
+                      {h.events.map((e) => (
+                        <Badge key={e}>{e}</Badge>
+                      ))}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right">
+                    <button
+                      onClick={() => remove.mutate(h.id)}
+                      className="text-muted transition-colors hover:text-danger"
+                      title="Delete webhook"
+                    >
+                      <Trash2 className="size-4" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
   );
 }
 

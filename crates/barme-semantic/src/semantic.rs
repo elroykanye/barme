@@ -4,6 +4,14 @@
 use crate::{Embedder, Match, Result, VectorIndex};
 use barme_core::Hash;
 
+/// What understanding an object yielded beyond the vector: any tags and text the
+/// embedder proxied back, for the caller to store as annotations. Usually empty.
+#[derive(Debug, Clone, Default)]
+pub struct Understanding {
+    pub tags: Vec<String>,
+    pub text: Option<String>,
+}
+
 pub struct Semantic {
     embedder: Box<dyn Embedder>,
     index: Box<dyn VectorIndex>,
@@ -15,16 +23,21 @@ impl Semantic {
     }
 
     /// Embed an object and file it under its content hash. Called off the write
-    /// path; keyed by id, so the same content is only ever embedded once.
+    /// path; keyed by id, so the same content is only ever embedded once. Any
+    /// tags/text the embedder returned come back for the caller to store.
     pub async fn understand(
         &self,
         tenant: &str,
         id: Hash,
         content_type: &str,
         bytes: &[u8],
-    ) -> Result<()> {
-        let vector = self.embedder.embed(content_type, bytes).await?;
-        self.index.upsert(tenant, id, vector).await
+    ) -> Result<Understanding> {
+        let enrichment = self.embedder.embed_rich(content_type, bytes).await?;
+        self.index.upsert(tenant, id, enrichment.vector).await?;
+        Ok(Understanding {
+            tags: enrichment.tags,
+            text: enrichment.text,
+        })
     }
 
     /// Embed a query and return the nearest objects within a tenant.

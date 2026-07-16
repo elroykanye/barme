@@ -14,9 +14,9 @@ mod embedder;
 mod index;
 mod semantic;
 
-pub use embedder::{Embedder, HttpEmbedder};
+pub use embedder::{Embedder, Enrichment, HttpEmbedder};
 pub use index::{MemoryIndex, Match, VectorIndex};
-pub use semantic::Semantic;
+pub use semantic::{Semantic, Understanding};
 
 pub type Vector = Vec<f32>;
 

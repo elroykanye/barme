@@ -1,29 +1,43 @@
-import { useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Copy,
+  ArrowDown,
+  ArrowUp,
+  ChevronRight,
   Download,
-  FolderInput,
+  FileArchive,
+  Folder,
   Globe,
-  Link2,
+  LayoutGrid,
+  Link as LinkIcon,
+  List,
   Lock,
   Pencil,
   Search,
   Settings,
+  Tag,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
-import { api, cdnUrl, downloadToDisk, publicUrl } from "@/lib/api";
-import { humanSize, shortHash } from "@/lib/format";
-import { copyText } from "@/lib/clipboard";
+import { api, downloadToDisk, publicUrl, type ObjectInfo } from "@/lib/api";
+import { humanSize } from "@/lib/format";
 import { useToast } from "@/lib/toast";
 import { useDialogs } from "@/lib/dialogs";
+import { useUploadManager } from "@/lib/uploads";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { UploadPanel } from "@/components/UploadPanel";
+import { ObjectPanel } from "@/components/ObjectPanel";
+
+type SortKey = "key" | "size" | "versions";
+type View = "list" | "grid";
+
+const IMG_RE = /\.(png|jpe?g|gif|webp|avif|svg|bmp)$/i;
 
 export function BucketView() {
   const { bucket = "" } = useParams();
@@ -32,9 +46,16 @@ export function BucketView() {
   const { prompt, confirm } = useDialogs();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const folderRef = useRef<HTMLInputElement>(null);
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const [dragging, setDragging] = useState(false);
   const [filter, setFilter] = useState("");
+  const [prefix, setPrefix] = useState("");
+  const [view, setView] = useState<View>("list");
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "key", dir: 1 });
 
   const objects = useQuery({
     queryKey: ["objects", bucket],
@@ -49,20 +70,48 @@ export function BucketView() {
     qc.invalidateQueries({ queryKey: ["stats"] });
   };
 
-  const upload = useMutation({
-    mutationFn: async (files: FileList) => {
-      for (const f of Array.from(files)) await api.upload(bucket, f.name, f);
-    },
-    onSuccess: () => {
-      refreshAll();
-      toast("Uploaded", "success");
-    },
-    onError: () => toast("Upload failed", "error"),
-  });
+  const uploads = useUploadManager(refreshAll);
+
+  // webkitdirectory is non-standard; set it imperatively to stay type-clean.
+  useEffect(() => {
+    const el = folderRef.current;
+    if (el) {
+      el.setAttribute("webkitdirectory", "");
+      el.setAttribute("directory", "");
+    }
+  }, []);
+
+  // Deep-link support: /p/:bucket?key=... opens that object's panel.
+  const keyParam = searchParams.get("key");
+  useEffect(() => {
+    if (keyParam) {
+      setSelectedKey(keyParam);
+      const p = keyParam.includes("/") ? keyParam.slice(0, keyParam.lastIndexOf("/") + 1) : "";
+      setPrefix(p);
+    }
+  }, [keyParam]);
+
+  function closePanel() {
+    setSelectedKey(null);
+    if (keyParam) {
+      searchParams.delete("key");
+      setSearchParams(searchParams, { replace: true });
+    }
+  }
+
   const toggle = useMutation({
     mutationFn: (pub: boolean) => api.setVisibility(bucket, pub),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["buckets"] }),
   });
+
+  function startUpload(files: FileList | File[], asFolder: boolean) {
+    const list = Array.from(files).map((f) => ({
+      file: f,
+      // Folder uploads preserve their relative path as the key.
+      key: prefix + (asFolder ? webkitPath(f) : f.name),
+    }));
+    if (list.length) uploads.start(bucket, list);
+  }
 
   async function renameBucket() {
     const name = (
@@ -97,9 +146,91 @@ export function BucketView() {
     }
   }
 
-  const rows = (objects.data ?? []).filter((o) =>
-    o.key.toLowerCase().includes(filter.toLowerCase()),
-  );
+  async function importUrl() {
+    const url = (await prompt({ title: "Import from URL", label: "Source URL" }))?.trim();
+    if (!url) return;
+    const guess = prefix + (url.split("/").pop() || "imported");
+    const key = (await prompt({ title: "Import from URL", label: "Store as key", defaultValue: guess }))?.trim();
+    if (!key) return;
+    try {
+      await api.importUrl(bucket, url, key);
+      toast("Imported", "success");
+      refreshAll();
+    } catch {
+      toast("Import failed", "error");
+    }
+  }
+
+  const all = objects.data ?? [];
+  const filtering = filter.trim().length > 0;
+
+  // Folder view: split immediate subfolders and files under the current prefix.
+  const level = useMemo(() => {
+    if (filtering) {
+      const f = filter.toLowerCase();
+      return {
+        folders: [] as { name: string; count: number }[],
+        files: all.filter((o) => o.key.toLowerCase().includes(f)),
+      };
+    }
+    const folders = new Map<string, number>();
+    const files: ObjectInfo[] = [];
+    for (const o of all) {
+      if (!o.key.startsWith(prefix)) continue;
+      const rest = o.key.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      if (slash === -1) files.push(o);
+      else {
+        const name = rest.slice(0, slash);
+        folders.set(name, (folders.get(name) ?? 0) + 1);
+      }
+    }
+    return {
+      folders: [...folders.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name)),
+      files,
+    };
+  }, [all, prefix, filter, filtering]);
+
+  const files = useMemo(() => {
+    const arr = [...level.files];
+    arr.sort((a, b) => {
+      let r = 0;
+      if (sort.key === "key") r = a.key.localeCompare(b.key);
+      else if (sort.key === "size") r = a.size - b.size;
+      else r = a.versions - b.versions;
+      return r * sort.dir;
+    });
+    return arr;
+  }, [level.files, sort]);
+
+  const crumbs = prefix ? prefix.replace(/\/$/, "").split("/") : [];
+  const allChecked = files.length > 0 && files.every((f) => checked.has(f.key));
+
+  function toggleSort(key: SortKey) {
+    setSort((s) => (s.key === key ? { key, dir: (s.dir === 1 ? -1 : 1) as 1 | -1 } : { key, dir: 1 }));
+  }
+  function toggleCheck(key: string) {
+    setChecked((s) => {
+      const n = new Set(s);
+      if (n.has(key)) n.delete(key);
+      else n.add(key);
+      return n;
+    });
+  }
+  function toggleAll() {
+    setChecked((s) => {
+      if (files.every((f) => s.has(f.key))) return new Set();
+      return new Set(files.map((f) => f.key));
+    });
+  }
+  function enterFolder(name: string) {
+    setPrefix((p) => p + name + "/");
+    setChecked(new Set());
+  }
+  function goCrumb(i: number) {
+    setPrefix(crumbs.slice(0, i + 1).join("/") + "/");
+    setChecked(new Set());
+  }
 
   return (
     <div className="flex h-full">
@@ -113,7 +244,7 @@ export function BucketView() {
         onDrop={(e) => {
           e.preventDefault();
           setDragging(false);
-          if (e.dataTransfer.files.length) upload.mutate(e.dataTransfer.files);
+          if (e.dataTransfer.files.length) startUpload(e.dataTransfer.files, false);
         }}
       >
         <div className="mb-4 flex items-center justify-between gap-4">
@@ -138,6 +269,9 @@ export function BucketView() {
                 {info.public_read ? "Make private" : "Make public"}
               </Button>
             )}
+            <Button variant="ghost" onClick={importUrl} title="Import from URL">
+              <LinkIcon className="size-4" />
+            </Button>
             <Link to={`/p/${encodeURIComponent(bucket)}/settings`}>
               <Button variant="ghost" title="Pot settings">
                 <Settings className="size-4" />
@@ -149,6 +283,9 @@ export function BucketView() {
             <Button variant="danger" onClick={deleteBucket} title="Delete pot">
               <Trash2 className="size-4" />
             </Button>
+            <Button variant="outline" onClick={() => folderRef.current?.click()} title="Upload folder">
+              <Folder className="size-4" />
+            </Button>
             <Button onClick={() => fileRef.current?.click()}>
               <Upload className="size-4" />
               Upload
@@ -158,20 +295,76 @@ export function BucketView() {
               type="file"
               multiple
               hidden
-              onChange={(e) => e.target.files && upload.mutate(e.target.files)}
+              onChange={(e) => {
+                if (e.target.files) startUpload(e.target.files, false);
+                e.target.value = "";
+              }}
+            />
+            <input
+              ref={folderRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                if (e.target.files) startUpload(e.target.files, true);
+                e.target.value = "";
+              }}
             />
           </div>
         </div>
 
-        <div className="relative mb-4 max-w-xs">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-faint" />
-          <Input
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="Filter by key…"
-            className="pl-9"
-          />
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="relative max-w-xs flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-faint" />
+            <Input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter by key…"
+              className="pl-9"
+            />
+          </div>
+          <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+            <button
+              onClick={() => setView("list")}
+              className={cn("rounded p-1.5", view === "list" ? "bg-elevated text-text" : "text-muted")}
+              title="List"
+            >
+              <List className="size-4" />
+            </button>
+            <button
+              onClick={() => setView("grid")}
+              className={cn("rounded p-1.5", view === "grid" ? "bg-elevated text-text" : "text-muted")}
+              title="Gallery"
+            >
+              <LayoutGrid className="size-4" />
+            </button>
+          </div>
         </div>
+
+        {!filtering && crumbs.length > 0 && (
+          <div className="mb-3 flex flex-wrap items-center gap-1 text-sm">
+            <button onClick={() => { setPrefix(""); setChecked(new Set()); }} className="text-muted hover:text-text">
+              {bucket}
+            </button>
+            {crumbs.map((c, i) => (
+              <span key={i} className="flex items-center gap-1">
+                <ChevronRight className="size-3.5 text-faint" />
+                <button onClick={() => goCrumb(i)} className="text-muted hover:text-text">
+                  {c}
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {checked.size > 0 && (
+          <BulkBar
+            bucket={bucket}
+            keys={[...checked]}
+            onClear={() => setChecked(new Set())}
+            onChanged={refreshAll}
+          />
+        )}
 
         <div
           className={cn(
@@ -181,31 +374,68 @@ export function BucketView() {
         >
           {objects.isLoading ? (
             <p className="p-6 text-sm text-muted">Loading…</p>
-          ) : !rows.length ? (
+          ) : !files.length && !level.folders.length ? (
             <div className="p-12 text-center text-sm text-muted">
-              {filter ? "No keys match." : "Empty. Drop files here, or use Upload."}
+              {filtering ? "No keys match." : "Empty. Drop files here, or use Upload."}
             </div>
+          ) : view === "grid" ? (
+            <Grid
+              bucket={bucket}
+              folders={level.folders}
+              files={files}
+              selectedKey={selectedKey}
+              onOpenFolder={enterFolder}
+              onSelect={setSelectedKey}
+            />
           ) : (
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-faint">
-                  <th className="px-4 py-2.5 font-medium">Key</th>
-                  <th className="px-4 py-2.5 font-medium">Size</th>
-                  <th className="px-4 py-2.5 font-medium">Versions</th>
+                  <th className="w-8 px-4 py-2.5">
+                    <Checkbox
+                      checked={allChecked}
+                      indeterminate={!allChecked && files.some((f) => checked.has(f.key))}
+                      onChange={toggleAll}
+                    />
+                  </th>
+                  <SortTh label="Key" k="key" sort={sort} onSort={toggleSort} />
+                  <SortTh label="Size" k="size" sort={sort} onSort={toggleSort} />
+                  <SortTh label="Versions" k="versions" sort={sort} onSort={toggleSort} />
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((o) => (
+                {level.folders.map((f) => (
+                  <tr
+                    key={"d:" + f.name}
+                    onClick={() => enterFolder(f.name)}
+                    className="cursor-pointer border-b border-border/60 hover:bg-elevated/50"
+                  >
+                    <td className="px-4 py-2.5" />
+                    <td className="px-4 py-2.5">
+                      <span className="flex items-center gap-2">
+                        <Folder className="size-4 text-accent" />
+                        {f.name}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-muted">—</td>
+                    <td className="px-4 py-2.5 text-muted">{f.count} item{f.count === 1 ? "" : "s"}</td>
+                    <td />
+                  </tr>
+                ))}
+                {files.map((o) => (
                   <tr
                     key={o.key}
-                    onClick={() => setSelected(o.key)}
+                    onClick={() => setSelectedKey(o.key)}
                     className={cn(
                       "cursor-pointer border-b border-border/60 last:border-0 hover:bg-elevated/50",
-                      selected === o.key && "bg-elevated",
+                      selectedKey === o.key && "bg-elevated",
                     )}
                   >
-                    <td className="px-4 py-2.5">{o.key}</td>
+                    <td className="px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
+                      <Checkbox checked={checked.has(o.key)} onChange={() => toggleCheck(o.key)} />
+                    </td>
+                    <td className="px-4 py-2.5">{leaf(o.key)}</td>
                     <td className="px-4 py-2.5 text-muted">{humanSize(o.size)}</td>
                     <td className="px-4 py-2.5 text-muted">{o.versions}</td>
                     <td className="px-4 py-2.5 text-right">
@@ -228,216 +458,188 @@ export function BucketView() {
         </div>
       </div>
 
-      {selected && (
+      {selectedKey && (
         <ObjectPanel
           bucket={bucket}
-          objectKey={selected}
+          objectKey={selectedKey}
           isPublic={info?.public_read ?? false}
-          onClose={() => setSelected(null)}
+          onClose={closePanel}
           onChanged={refreshAll}
         />
       )}
+
+      <UploadPanel items={uploads.items} onClear={uploads.clearFinished} />
     </div>
   );
 }
 
-function ObjectPanel({
+function SortTh({
+  label,
+  k,
+  sort,
+  onSort,
+}: {
+  label: string;
+  k: SortKey;
+  sort: { key: SortKey; dir: 1 | -1 };
+  onSort: (k: SortKey) => void;
+}) {
+  return (
+    <th className="px-4 py-2.5 font-medium">
+      <button onClick={() => onSort(k)} className="flex items-center gap-1 uppercase hover:text-text">
+        {label}
+        {sort.key === k &&
+          (sort.dir === 1 ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />)}
+      </button>
+    </th>
+  );
+}
+
+function Grid({
   bucket,
-  objectKey,
-  isPublic,
-  onClose,
+  folders,
+  files,
+  selectedKey,
+  onOpenFolder,
+  onSelect,
+}: {
+  bucket: string;
+  folders: { name: string; count: number }[];
+  files: ObjectInfo[];
+  selectedKey: string | null;
+  onOpenFolder: (name: string) => void;
+  onSelect: (key: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3 p-3 sm:grid-cols-3 lg:grid-cols-4">
+      {folders.map((f) => (
+        <button
+          key={"d:" + f.name}
+          onClick={() => onOpenFolder(f.name)}
+          className="flex flex-col items-center gap-2 rounded-lg border border-border p-4 hover:bg-elevated"
+        >
+          <Folder className="size-8 text-accent" />
+          <span className="w-full truncate text-center text-xs">{f.name}</span>
+        </button>
+      ))}
+      {files.map((o) => (
+        <button
+          key={o.key}
+          onClick={() => onSelect(o.key)}
+          className={cn(
+            "group flex flex-col overflow-hidden rounded-lg border text-left",
+            selectedKey === o.key ? "border-accent" : "border-border hover:border-accent/50",
+          )}
+        >
+          <div className="flex aspect-square items-center justify-center bg-bg">
+            {IMG_RE.test(o.key) ? (
+              <img
+                src={publicUrl(bucket, o.key)}
+                alt={o.key}
+                loading="lazy"
+                className="size-full object-cover"
+                onError={(e) => (e.currentTarget.style.visibility = "hidden")}
+              />
+            ) : (
+              <FileArchive className="size-8 text-faint" />
+            )}
+          </div>
+          <div className="border-t border-border px-2 py-1.5">
+            <div className="truncate text-xs">{leaf(o.key)}</div>
+            <div className="text-[10px] text-faint">{humanSize(o.size)}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function BulkBar({
+  bucket,
+  keys,
+  onClear,
   onChanged,
 }: {
   bucket: string;
-  objectKey: string;
-  isPublic: boolean;
-  onClose: () => void;
+  keys: string[];
+  onClear: () => void;
   onChanged: () => void;
 }) {
   const toast = useToast();
   const { prompt, confirm } = useDialogs();
-  const manifest = useQuery({
-    queryKey: ["manifest", bucket, objectKey],
-    queryFn: () => api.manifest(bucket, objectKey),
-  });
-  const history = useQuery({
-    queryKey: ["history", bucket, objectKey],
-    queryFn: () => api.history(bucket, objectKey),
-  });
-  const m = manifest.data;
 
-  const ct = m?.original.content_type ?? "";
-  const isImage = ct.startsWith("image/");
-  const isText = ct.startsWith("text/") || ct.includes("json") || ct.includes("xml");
-
-  const text = useQuery({
-    queryKey: ["preview", bucket, objectKey],
-    queryFn: async () => (await api.download(bucket, objectKey)).text(),
-    enabled: isText,
-  });
-
-  function copy(url: string, label: string) {
-    copyText(url)
-      .then(() => toast(`${label} copied`, "success"))
-      .catch(() => toast("Copy failed", "error"));
-  }
-
-  async function rename() {
-    const to = (
-      await prompt({ title: "Rename object", label: "New key", defaultValue: objectKey })
-    )?.trim();
-    if (!to || to === objectKey) return;
-    await api.moveObject(bucket, objectKey, bucket, to);
-    toast("Renamed", "success");
-    onChanged();
-    onClose();
-  }
-
-  async function move(copyInstead: boolean) {
-    const dest = (
-      await prompt({
-        title: copyInstead ? "Copy object" : "Move object",
-        label: "Destination (pot/key)",
-        defaultValue: `${bucket}/${objectKey}`,
-      })
-    )?.trim();
-    if (!dest) return;
-    const i = dest.indexOf("/");
-    if (i < 1) {
-      toast("Use pot/key", "error");
-      return;
+  async function zip() {
+    try {
+      const blob = await api.zip(bucket, keys);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${bucket}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast("Zip failed", "error");
     }
-    const tb = dest.slice(0, i);
-    const tk = dest.slice(i + 1);
-    const fn = copyInstead ? api.copyObject : api.moveObject;
-    await fn(bucket, objectKey, tb, tk);
-    toast(copyInstead ? "Copied" : "Moved", "success");
-    onChanged();
-    if (!copyInstead) onClose();
   }
-
+  async function downloadEach() {
+    for (const k of keys) await downloadToDisk(bucket, k);
+  }
+  async function tagAll() {
+    const tag = (await prompt({ title: "Tag selection", label: "Tag" }))?.trim();
+    if (!tag) return;
+    try {
+      for (const k of keys) {
+        const meta = await api.getMeta(bucket, k).catch(() => ({ tags: {}, note: "", favorite: false, locked_until: null }));
+        await api.setMeta(bucket, k, { ...meta, tags: { ...meta.tags, [tag]: "" } });
+      }
+      toast("Tagged", "success");
+    } catch {
+      toast("Tagging failed", "error");
+    }
+  }
   async function del() {
     const ok = await confirm({
-      title: "Delete object",
-      message: `Delete "${objectKey}"?`,
+      title: "Delete objects",
+      message: `Delete ${keys.length} object${keys.length === 1 ? "" : "s"}?`,
       confirmLabel: "Delete",
       danger: true,
     });
     if (!ok) return;
-    await api.remove(bucket, objectKey);
+    for (const k of keys) await api.remove(bucket, k);
     toast("Deleted", "success");
+    onClear();
     onChanged();
-    onClose();
   }
 
   return (
-    <aside className="flex w-96 shrink-0 flex-col border-l border-border bg-panel">
-      <div className="flex h-14 items-center justify-between border-b border-border px-4">
-        <span className="truncate text-sm font-medium">{objectKey}</span>
-        <button onClick={onClose} className="text-muted transition-colors hover:text-text">
+    <div className="mb-3 flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 text-sm">
+      <span className="font-medium">{keys.length} selected</span>
+      <div className="ml-auto flex items-center gap-2">
+        <Button variant="outline" onClick={zip} title="Download as zip">
+          <FileArchive className="size-4" /> Zip
+        </Button>
+        <Button variant="outline" onClick={downloadEach} title="Download each">
+          <Download className="size-4" />
+        </Button>
+        <Button variant="outline" onClick={tagAll}>
+          <Tag className="size-4" /> Tag
+        </Button>
+        <Button variant="danger" onClick={del}>
+          <Trash2 className="size-4" /> Delete
+        </Button>
+        <button onClick={onClear} className="text-muted hover:text-text" title="Clear">
           <X className="size-4" />
         </button>
       </div>
-
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
-        {isImage && m && (
-          <img
-            src={cdnUrl(m.object_id)}
-            alt={objectKey}
-            className="max-h-56 w-full rounded-lg border border-border object-contain"
-          />
-        )}
-        {isText && text.data !== undefined && (
-          <pre className="max-h-56 overflow-auto rounded-lg border border-border bg-bg p-3 text-xs text-muted">
-            {text.data.slice(0, 4000)}
-          </pre>
-        )}
-
-        {m && (
-          <>
-            <div className="flex flex-wrap gap-1.5">
-              <Badge>{m.storage.route}</Badge>
-              <Badge tone={m.storage.fidelity === "exact" ? "ok" : "warn"}>
-                {m.storage.fidelity}
-              </Badge>
-              <Badge tone="accent">{m.storage.codec}</Badge>
-            </div>
-            <dl className="space-y-2 text-xs">
-              <Row k="Original" v={humanSize(m.original.size_bytes)} />
-              <Row k="Stored" v={humanSize(m.storage.stored_size_bytes)} />
-              <Row k="Type" v={m.original.content_type} />
-              <Row k="Chunks" v={String(m.chunking.chunks.length)} />
-              <Row k="Object id" v={shortHash(m.object_id)} mono />
-            </dl>
-
-            <div className="space-y-2">
-              <div className="text-[11px] uppercase tracking-wider text-faint">Share</div>
-              <button
-                onClick={() => copy(cdnUrl(m.object_id), "Immutable link")}
-                className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-xs text-muted hover:bg-elevated hover:text-text"
-              >
-                <Link2 className="size-3.5" /> Copy immutable CDN link
-              </button>
-              {isPublic && (
-                <button
-                  onClick={() => copy(publicUrl(bucket, objectKey), "Public link")}
-                  className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-xs text-muted hover:bg-elevated hover:text-text"
-                >
-                  <Globe className="size-3.5" /> Copy public link
-                </button>
-              )}
-            </div>
-          </>
-        )}
-
-        <div>
-          <div className="mb-2 text-[11px] uppercase tracking-wider text-faint">
-            Versions ({history.data?.length ?? 0})
-          </div>
-          <ol className="space-y-1">
-            {history.data?.map((id, i) => (
-              <li
-                key={id}
-                className="flex items-center justify-between rounded bg-elevated/50 px-2 py-1 text-xs"
-              >
-                <span className="font-mono text-muted">{shortHash(id)}</span>
-                <span className="text-faint">v{i + 1}</span>
-              </li>
-            ))}
-          </ol>
-        </div>
-      </div>
-
-      <div className="space-y-2 border-t border-border p-4">
-        <div className="flex gap-2">
-          <Button variant="outline" className="flex-1" onClick={() => void downloadToDisk(bucket, objectKey)}>
-            <Download className="size-4" />
-            Download
-          </Button>
-          <Button variant="outline" onClick={rename} title="Rename">
-            <Pencil className="size-4" />
-          </Button>
-          <Button variant="outline" onClick={() => move(false)} title="Move">
-            <FolderInput className="size-4" />
-          </Button>
-          <Button variant="outline" onClick={() => move(true)} title="Copy">
-            <Copy className="size-4" />
-          </Button>
-        </div>
-        <Button variant="danger" className="w-full" onClick={del}>
-          <Trash2 className="size-4" />
-          Delete
-        </Button>
-      </div>
-    </aside>
+    </div>
   );
 }
 
-function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <dt className="text-faint">{k}</dt>
-      <dd className={cn("truncate", mono && "font-mono")}>{v}</dd>
-    </div>
-  );
+function leaf(key: string): string {
+  return key.split("/").pop() || key;
+}
+
+function webkitPath(f: File): string {
+  const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath;
+  return rel && rel.length ? rel : f.name;
 }

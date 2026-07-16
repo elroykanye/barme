@@ -9,17 +9,23 @@
 //! the manifest are durable before a pointer moves to them. GC leans on it to
 //! know a just-written chunk is never garbage even before anything points at it.
 
+mod annotation_store;
 mod chunk_store;
 mod key_store;
 mod manifest_store;
 mod meta_store;
 mod pointer_store;
+mod reverse_store;
+mod webhook_store;
 
+pub use annotation_store::AnnotationStore;
 pub use chunk_store::ChunkStore;
 pub use key_store::KeyStore;
 pub use manifest_store::ManifestStore;
 pub use meta_store::MetaStore;
 pub use pointer_store::PointerStore;
+pub use reverse_store::ReverseStore;
+pub use webhook_store::WebhookStore;
 
 use barme_core::Hash;
 use std::io::Write;
@@ -50,6 +56,9 @@ pub struct Store {
     pub pointers: PointerStore,
     pub meta: MetaStore,
     pub keys: KeyStore,
+    pub annotations: AnnotationStore,
+    pub reverse: ReverseStore,
+    pub webhooks: WebhookStore,
 }
 
 impl Store {
@@ -61,6 +70,9 @@ impl Store {
             pointers: PointerStore::open(root.join("pointers"))?,
             meta: MetaStore::open(root.join("meta"))?,
             keys: KeyStore::open(root.join("keys"))?,
+            annotations: AnnotationStore::open(root.join("annotations"))?,
+            reverse: ReverseStore::open(root.join("reverse"))?,
+            webhooks: WebhookStore::open(root.join("webhooks"))?,
         })
     }
 }

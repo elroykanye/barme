@@ -15,19 +15,24 @@
 
 use barme_codec::{Codec, CodecError, Raw, Zstd};
 use barme_core::{
-    Chunking, Fidelity, Hash, Manifest, Original, Quality, Route, Storage, MANIFEST_VERSION,
+    Annotation, Chunking, Fidelity, Hash, Manifest, Original, Quality, Route, Storage, Webhook,
+    MANIFEST_VERSION,
 };
 use barme_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
 /// Emitted after a successful write, for anything that wants to react to new
-/// objects (the semantic layer, mostly). Handed to the write hook by value.
+/// objects (the semantic layer and webhooks). Handed to the write hook by value.
 pub struct WriteEvent {
     pub object_id: Hash,
     pub tenant: String,
     pub content_type: String,
+    /// Where the write landed, so reactors can annotate or report the location.
+    pub bucket: String,
+    pub key: String,
     pub bytes: Vec<u8>,
 }
 
@@ -48,6 +53,10 @@ pub enum EngineError {
     /// Reassembled bytes don't match the digest the manifest recorded.
     #[error("integrity: object {0} did not reassemble to its recorded digest")]
     Integrity(Hash),
+    /// A write or delete was refused because the object is locked until a time
+    /// still in the future.
+    #[error("locked: {0}/{1} is locked until {2}")]
+    Locked(String, String, String),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;
@@ -60,6 +69,14 @@ pub struct Stats {
     pub logical_bytes: u64,
     pub physical_bytes: u64,
     pub unique_chunks: usize,
+}
+
+/// The result of comparing two object versions by their chunk sets.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Diff {
+    pub added: usize,
+    pub removed: usize,
+    pub shared: usize,
 }
 
 /// How new objects get written. Per-bucket policy lives on top of this later;
@@ -112,6 +129,7 @@ impl Engine {
     /// Write an object and return its object_id. Prior versions of the same
     /// key stay resolvable; only the pointer moves.
     pub fn put(&self, bucket: &str, key: &str, data: &[u8], content_type: &str) -> Result<Hash> {
+        self.ensure_unlocked(bucket, key)?;
         // Effective policy: the pot's overrides, falling back to the server
         // default. This is where per-pot config actually takes effect.
         let cfg = self.store.meta.config(bucket)?;
@@ -165,12 +183,17 @@ impl Engine {
 
         let object_id = self.store.manifests.put(&manifest)?;
         self.store.pointers.set(bucket, key, &object_id)?;
+        // Record where this object_id lives, so a semantic hit can name a
+        // location and auto-tagging can find the object to annotate.
+        self.store.reverse.add(&object_id, bucket, key)?;
 
         if let Some(hook) = &self.write_hook {
             hook(WriteEvent {
                 object_id,
                 tenant: self.policy.tenant.clone(),
                 content_type: content_type.to_string(),
+                bucket: bucket.to_string(),
+                key: key.to_string(),
                 bytes: data.to_vec(),
             });
         }
@@ -214,6 +237,7 @@ impl Engine {
     }
 
     pub fn delete(&self, bucket: &str, key: &str) -> Result<()> {
+        self.ensure_unlocked(bucket, key)?;
         Ok(self.store.pointers.remove(bucket, key)?)
     }
 
@@ -369,6 +393,122 @@ impl Engine {
         })
     }
 
+    // ---- annotations + locking ----
+
+    /// The object's user annotation (tags, note, favorite, lock). Empty default
+    /// if never set.
+    pub fn annotation(&self, bucket: &str, key: &str) -> Result<Annotation> {
+        Ok(self.store.annotations.get(bucket, key)?)
+    }
+
+    pub fn set_annotation(&self, bucket: &str, key: &str, annotation: &Annotation) -> Result<()> {
+        Ok(self.store.annotations.set(bucket, key, annotation)?)
+    }
+
+    /// Refuse if the object is locked until a time still in the future.
+    fn ensure_unlocked(&self, bucket: &str, key: &str) -> Result<()> {
+        if let Some(until) = self.store.annotations.get(bucket, key)?.locked_until {
+            if let Some(until_secs) = parse_rfc3339_secs(&until) {
+                if until_secs > now_unix() {
+                    return Err(EngineError::Locked(bucket.into(), key.into(), until));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ---- versions, diff, verify ----
+
+    /// Roll a key's pointer forward to an existing manifest (an older version,
+    /// usually). The manifest must already be in the store. Honors the lock.
+    pub fn restore_version(&self, bucket: &str, key: &str, object_id: &Hash) -> Result<()> {
+        self.ensure_unlocked(bucket, key)?;
+        if self.store.manifests.get(object_id)?.is_none() {
+            return Err(EngineError::DanglingPointer(*object_id));
+        }
+        self.store.pointers.set(bucket, key, object_id)?;
+        self.store.reverse.add(object_id, bucket, key)?;
+        Ok(())
+    }
+
+    /// Compare two manifests by their chunk sets: how many chunks `b` adds over
+    /// `a`, how many it drops, and how many they share.
+    pub fn diff(&self, a: &Hash, b: &Hash) -> Result<Diff> {
+        let ma = self
+            .store
+            .manifests
+            .get(a)?
+            .ok_or(EngineError::DanglingPointer(*a))?;
+        let mb = self
+            .store
+            .manifests
+            .get(b)?
+            .ok_or(EngineError::DanglingPointer(*b))?;
+        let sa: HashSet<Hash> = ma.chunking.chunks.into_iter().collect();
+        let sb: HashSet<Hash> = mb.chunking.chunks.into_iter().collect();
+        Ok(Diff {
+            added: sb.difference(&sa).count(),
+            removed: sa.difference(&sb).count(),
+            shared: sa.intersection(&sb).count(),
+        })
+    }
+
+    /// Re-read the current version and check it reassembles to the digest the
+    /// manifest recorded. Integrity failures come back as `Ok(false)`, not an
+    /// error, so a caller can report a bad object without the request failing.
+    /// A key with no current version is `Ok(false)`.
+    pub fn verify(&self, bucket: &str, key: &str) -> Result<bool> {
+        let Some(object_id) = self.store.pointers.current(bucket, key)? else {
+            return Ok(false);
+        };
+        let manifest = self
+            .store
+            .manifests
+            .get(&object_id)?
+            .ok_or(EngineError::DanglingPointer(object_id))?;
+        match self.read_manifest_bytes(&object_id) {
+            Ok(bytes) => Ok(sha256_hex(&bytes) == manifest.original.sha256),
+            Err(EngineError::Integrity(_)) => Ok(false),
+            Err(EngineError::Store(StoreError::Integrity { .. })) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    // ---- reverse index ----
+
+    /// Pots/keys that point at an object_id, insertion order. Empty if unknown.
+    pub fn locations(&self, object_id: &Hash) -> Result<Vec<(String, String)>> {
+        Ok(self.store.reverse.get(object_id)?)
+    }
+
+    // ---- presign ----
+
+    /// The server signing secret: the first owner key's secret, or None if there
+    /// are no keys (open mode) or none is a full owner.
+    pub fn signing_secret(&self) -> Option<String> {
+        self.store
+            .keys
+            .list()
+            .ok()?
+            .into_iter()
+            .find(|k| k.is_owner())
+            .map(|k| k.secret_key)
+    }
+
+    // ---- webhooks ----
+
+    pub fn list_webhooks(&self) -> Result<Vec<Webhook>> {
+        Ok(self.store.webhooks.list()?)
+    }
+
+    pub fn add_webhook(&self, hook: &Webhook) -> Result<()> {
+        Ok(self.store.webhooks.put(hook)?)
+    }
+
+    pub fn delete_webhook(&self, id: &str) -> Result<()> {
+        Ok(self.store.webhooks.delete(id)?)
+    }
+
     fn read_manifest_bytes(&self, object_id: &Hash) -> Result<Vec<u8>> {
         let manifest = self
             .store
@@ -430,4 +570,11 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     time::OffsetDateTime::parse(s, &Rfc3339)
         .ok()
         .map(|t| t.unix_timestamp().max(0) as u64)
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
