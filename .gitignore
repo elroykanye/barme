@@ -1,9 +1,17 @@
-/target
-**/*.rs.bk
-.DS_Store
-*.pdb
-/barme-data
-**/barme-data/
+# Rust build output (any crate, any depth)
+target/
+
+# Runtime store data (any location)
+barme-data/
+
+# Local config; the checked-in template is barme.toml.example
 /barme.toml
+
+# Web build output and dependencies
 web/dist/
 web/node_modules/
+
+# Editor and OS cruft
+*.rs.bk
+*.pdb
+.DS_Store
