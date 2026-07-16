@@ -114,7 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3_addr: SocketAddr = "0.0.0.0:9000".parse()?;
     let native_addr: SocketAddr = "0.0.0.0:7373".parse()?;
-    tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}");
+    let cdn_addr: SocketAddr = "0.0.0.0:7375".parse()?;
+    tracing::info!("barmed: S3 on {s3_addr}, native on {native_addr}, cdn on {cdn_addr}");
 
     let s3_state = S3State {
         engine: engine.clone(),
@@ -128,6 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3 = barme_s3::serve(s3_state, s3_addr);
     let native = barme_native::serve(native_state, native_addr);
+    let cdn = barme_cdn::serve(engine.clone(), cdn_addr);
 
     #[cfg(feature = "ui")]
     {
@@ -137,11 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listener = tokio::net::TcpListener::bind(console_addr).await?;
             axum::serve(listener, ui::router()).await
         };
-        tokio::try_join!(s3, native, console)?;
+        tokio::try_join!(s3, native, cdn, console)?;
     }
     #[cfg(not(feature = "ui"))]
     {
-        tokio::try_join!(s3, native)?;
+        tokio::try_join!(s3, native, cdn)?;
     }
     Ok(())
 }
