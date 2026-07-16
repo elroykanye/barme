@@ -80,6 +80,13 @@ to run open. Set `BARME_EMBED_URL` to enable semantic search.
 
 Full design notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Status
+
+Alpha (v0.1.0). It works end to end and is fun to run, but it's early: large
+uploads are buffered in memory (no streaming multipart yet), key secrets are
+stored in the clear (AWS-style), and with no keys configured it runs open. Don't
+put anything you can't lose in it yet.
+
 ## License
 
-TBD.
+MIT. See [LICENSE](LICENSE).

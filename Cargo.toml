@@ -4,8 +4,9 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT OR Apache-2.0"
-repository = ""
+version = "0.1.0"
+license = "MIT"
+repository = "https://github.com/elroykanye/barme"
 
 # Shared versions. Bump with `cargo update` once the toolchain is up;
 # these are major pins, so they resolve to the latest compatible release.
