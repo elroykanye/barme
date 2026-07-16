@@ -79,6 +79,24 @@ pub struct Diff {
     pub shared: usize,
 }
 
+/// The actionable form of a diff: the exact chunks a sync from `from` to `to`
+/// would transfer (`add`) and the ones `to` no longer uses (`remove`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Delta {
+    pub root: Hash,
+    pub add: Vec<Hash>,
+    pub remove: Vec<Hash>,
+}
+
+/// A Merkle inclusion proof for one chunk of one object.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChunkProof {
+    pub object_id: Hash,
+    pub root: Hash,
+    pub chunk: Hash,
+    pub proof: barme_core::merkle::Proof,
+}
+
 /// How new objects get written. Per-bucket policy lives on top of this later;
 /// for now it's one policy per engine.
 #[derive(Debug, Clone)]
@@ -154,6 +172,7 @@ impl Engine {
             stored_size += encoded.len() as u64;
             chunks.push(self.store.chunks.put(&encoded)?);
         }
+        let merkle_root = Some(barme_core::merkle::root(&chunks));
 
         let manifest = Manifest {
             manifest_version: MANIFEST_VERSION,
@@ -175,6 +194,7 @@ impl Engine {
             chunking: Chunking {
                 algo: Some("fastcdc".into()),
                 chunks,
+                merkle_root,
             },
             quality: Quality::default(),
             tenant: self.policy.tenant.clone(),
@@ -472,6 +492,144 @@ impl Engine {
             Err(EngineError::Store(StoreError::Integrity { .. })) => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    // ---- merkle: roots, inclusion proofs, sync deltas ----
+
+    /// The Merkle root committing to an object's ordered chunks. Read from the
+    /// manifest, recomputed if the manifest predates the field.
+    pub fn object_root(&self, object_id: &Hash) -> Result<Hash> {
+        let m = self
+            .store
+            .manifests
+            .get(object_id)?
+            .ok_or(EngineError::DanglingPointer(*object_id))?;
+        Ok(m.chunking
+            .merkle_root
+            .unwrap_or_else(|| barme_core::merkle::root(&m.chunking.chunks)))
+    }
+
+    /// An inclusion proof that the chunk at `index` belongs to the current
+    /// version of a key. `None` if the key or that chunk index doesn't exist.
+    pub fn prove_chunk(&self, bucket: &str, key: &str, index: usize) -> Result<Option<ChunkProof>> {
+        let Some(object_id) = self.store.pointers.current(bucket, key)? else {
+            return Ok(None);
+        };
+        let m = self
+            .store
+            .manifests
+            .get(&object_id)?
+            .ok_or(EngineError::DanglingPointer(object_id))?;
+        let Some(proof) = barme_core::merkle::prove(&m.chunking.chunks, index) else {
+            return Ok(None);
+        };
+        let root = m
+            .chunking
+            .merkle_root
+            .unwrap_or_else(|| barme_core::merkle::root(&m.chunking.chunks));
+        Ok(Some(ChunkProof {
+            object_id,
+            root,
+            chunk: m.chunking.chunks[index],
+            proof,
+        }))
+    }
+
+    /// The chunk-level delta from `from` to `to`: which chunks `to` adds that
+    /// `from` lacks (what a sync would carry) and which it drops.
+    pub fn delta(&self, from: &Hash, to: &Hash) -> Result<Delta> {
+        let mf = self
+            .store
+            .manifests
+            .get(from)?
+            .ok_or(EngineError::DanglingPointer(*from))?;
+        let mt = self
+            .store
+            .manifests
+            .get(to)?
+            .ok_or(EngineError::DanglingPointer(*to))?;
+        let have: HashSet<Hash> = mf.chunking.chunks.iter().copied().collect();
+        let want: HashSet<Hash> = mt.chunking.chunks.iter().copied().collect();
+        Ok(Delta {
+            root: mt
+                .chunking
+                .merkle_root
+                .unwrap_or_else(|| barme_core::merkle::root(&mt.chunking.chunks)),
+            add: mt
+                .chunking
+                .chunks
+                .iter()
+                .copied()
+                .filter(|h| !have.contains(h))
+                .collect(),
+            remove: mf
+                .chunking
+                .chunks
+                .iter()
+                .copied()
+                .filter(|h| !want.contains(h))
+                .collect(),
+        })
+    }
+
+    // ---- sync primitives: replicate an object between stores ----
+
+    /// Is this chunk present locally?
+    pub fn has_chunk(&self, hash: &Hash) -> bool {
+        self.store.chunks.has(hash)
+    }
+
+    /// Of `wanted`, the chunks this store lacks. A puller sends its target
+    /// manifest's chunk list; the answer is exactly what to fetch.
+    pub fn missing_chunks(&self, wanted: &[Hash]) -> Vec<Hash> {
+        wanted
+            .iter()
+            .copied()
+            .filter(|h| !self.store.chunks.has(h))
+            .collect()
+    }
+
+    /// Raw stored bytes of a chunk (compressed as written), by hash, to ship it
+    /// to another store verbatim.
+    pub fn chunk_bytes(&self, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        Ok(self.store.chunks.get(hash)?)
+    }
+
+    /// Store raw chunk bytes received from another store. Content-addressed, so
+    /// the bytes verify themselves; returns the address.
+    pub fn put_chunk_bytes(&self, bytes: &[u8]) -> Result<Hash> {
+        Ok(self.store.chunks.put(bytes)?)
+    }
+
+    /// Adopt a manifest fetched from another store and point `bucket/key` at it.
+    /// Refuses unless every chunk it names is already present and its declared
+    /// object_id and Merkle root check out. Returns the object_id.
+    pub fn import_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        manifest: &barme_core::Manifest,
+    ) -> Result<Hash> {
+        self.ensure_unlocked(bucket, key)?;
+        for h in &manifest.chunking.chunks {
+            if !self.store.chunks.has(h) {
+                return Err(EngineError::MissingChunk(*h, manifest.object_id));
+            }
+        }
+        if let Some(root) = manifest.chunking.merkle_root {
+            if root != barme_core::merkle::root(&manifest.chunking.chunks) {
+                return Err(EngineError::Integrity(manifest.object_id));
+            }
+        }
+        // manifests.put re-derives the id from content; a mismatch means the
+        // manifest was altered in transit.
+        let object_id = self.store.manifests.put(manifest)?;
+        if object_id != manifest.object_id {
+            return Err(EngineError::Integrity(manifest.object_id));
+        }
+        self.store.pointers.set(bucket, key, &object_id)?;
+        self.store.reverse.add(&object_id, bucket, key)?;
+        Ok(object_id)
     }
 
     // ---- reverse index ----

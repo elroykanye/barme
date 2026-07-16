@@ -109,7 +109,15 @@ pub fn app(state: AppState) -> Router {
         .route("/content/{hash}", get(content))
         .route("/search", post(search))
         .route("/similar/{hash}", post(similar))
-        .route("/sync", post(not_yet))
+        // Merkle: inclusion proofs and the chunk-level delta between versions.
+        .route("/proof/{bucket}/{*key}", get(proof))
+        .route("/delta/{bucket}/{*key}", get(delta_handler))
+        // Sync: replicate an object between stores. Pull = plan then fetch
+        // chunks then import; push = put chunks then import.
+        .route("/object/{id}", get(object_by_id))
+        .route("/chunk/{hash}", get(chunk_get).put(chunk_put))
+        .route("/sync/plan", post(sync_plan))
+        .route("/sync/import/{bucket}/{*key}", post(import_object_handler))
         .route("/docs", get(docs))
         // Allow large uploads; the whole body is buffered for now (streaming
         // multipart lands later).
@@ -833,8 +841,137 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-async fn not_yet(_body: Bytes) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "not implemented yet").into_response()
+// ---- merkle proofs + sync ------------------------------------------------
+
+#[derive(Deserialize)]
+struct ProofQuery {
+    index: usize,
+}
+
+/// A Merkle inclusion proof for one chunk of a key's current version.
+async fn proof(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<ProofQuery>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    match st.engine.prove_chunk(&bucket, &key, q.index)? {
+        Some(p) => Ok(Json(p).into_response()),
+        None => Ok(StatusCode::NOT_FOUND.into_response()),
+    }
+}
+
+/// The chunk-level delta between two versions: the exact hashes to transfer.
+async fn delta_handler(
+    State(st): State<AppState>,
+    Path((bucket, _key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(q): Query<DiffQuery>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_read(&st, &bucket)?;
+    let (Ok(a), Ok(b)) = (q.a.parse::<Hash>(), q.b.parse::<Hash>()) else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed a or b object_id").into_response());
+    };
+    Ok(Json(st.engine.delta(&a, &b)?).into_response())
+}
+
+/// Fetch a manifest by object_id, for a puller assembling an object from
+/// another store. Owner-only, like fetch-by-hash.
+async fn object_by_id(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let Ok(object_id) = id.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed object_id").into_response());
+    };
+    match st.engine.object_manifest(&object_id)? {
+        Some(m) => Ok(Json(m).into_response()),
+        None => Ok(StatusCode::NOT_FOUND.into_response()),
+    }
+}
+
+/// Raw stored bytes of a chunk, to ship it verbatim to another store.
+async fn chunk_get(
+    State(st): State<AppState>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let Ok(h) = hash.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed chunk hash").into_response());
+    };
+    match st.engine.chunk_bytes(&h)? {
+        Some(bytes) => Ok(with_bytes(DEFAULT_CONTENT_TYPE, bytes)),
+        None => Ok(StatusCode::NOT_FOUND.into_response()),
+    }
+}
+
+/// Accept raw chunk bytes from another store. The path hash must match the
+/// content, so a corrupt transfer is rejected.
+async fn chunk_put(
+    State(st): State<AppState>,
+    Path(hash): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let Ok(want) = hash.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed chunk hash").into_response());
+    };
+    let got = st.engine.put_chunk_bytes(&body)?;
+    if got != want {
+        return Ok((StatusCode::BAD_REQUEST, "chunk hash does not match body").into_response());
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+struct SyncPlanRequest {
+    object_id: String,
+    #[serde(default)]
+    have: Vec<String>,
+}
+
+/// Given a target object_id and the chunks the caller already holds, return the
+/// manifest and the exact chunks still to fetch. One round trip to plan a pull.
+async fn sync_plan(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SyncPlanRequest>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_owner()?;
+    let Ok(object_id) = req.object_id.parse::<Hash>() else {
+        return Ok((StatusCode::BAD_REQUEST, "malformed object_id").into_response());
+    };
+    let Some(m) = st.engine.object_manifest(&object_id)? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let have: std::collections::HashSet<Hash> =
+        req.have.iter().filter_map(|s| s.parse::<Hash>().ok()).collect();
+    let missing: Vec<String> = m
+        .chunking
+        .chunks
+        .iter()
+        .filter(|h| !have.contains(h))
+        .map(|h| h.to_string())
+        .collect();
+    Ok(Json(serde_json::json!({ "manifest": m, "missing": missing })).into_response())
+}
+
+/// Adopt a manifest fetched from another store, pointing bucket/key at it. Every
+/// chunk it names must already be present (push them first via PUT /chunk).
+async fn import_object_handler(
+    State(st): State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(manifest): Json<barme_core::Manifest>,
+) -> Result<Response, NativeError> {
+    caller(&st, &headers).require_write(&bucket)?;
+    let id = st.engine.import_object(&bucket, &key, &manifest)?;
+    Ok(Json(serde_json::json!({ "object_id": id.to_string() })).into_response())
 }
 
 /// A simple, self-contained API reference for the native door.
@@ -884,6 +1021,15 @@ a{color:#7c6cff}
 <h2>Search &amp; AI</h2><table>
 <tr><td class=m>POST</td><td><code>/search</code></td><td class=d>{query} — semantic search</td></tr>
 <tr><td class=m>POST</td><td><code>/similar/{hash}</code></td><td class=d>nearest objects</td></tr>
+</table>
+
+<h2>Merkle &amp; sync</h2><table>
+<tr><td class=m>GET</td><td><code>/proof/{pot}/{key}?index</code></td><td class=d>inclusion proof for one chunk</td></tr>
+<tr><td class=m>GET</td><td><code>/delta/{pot}/{key}?a&b</code></td><td class=d>chunks to transfer between versions</td></tr>
+<tr><td class=m>GET</td><td><code>/object/{id}</code></td><td class=d>manifest by object_id</td></tr>
+<tr><td class=m>GET/PUT</td><td><code>/chunk/{hash}</code></td><td class=d>raw chunk bytes (ship / receive)</td></tr>
+<tr><td class=m>POST</td><td><code>/sync/plan</code></td><td class=d>{object_id, have[]} — manifest + missing chunks</td></tr>
+<tr><td class=m>POST</td><td><code>/sync/import/{pot}/{key}</code></td><td class=d>adopt a fetched manifest</td></tr>
 </table>
 
 <h2>Admin</h2><table>

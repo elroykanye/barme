@@ -74,6 +74,17 @@ pub struct Storage {
 pub struct Chunking {
     pub algo: Option<String>,
     pub chunks: Vec<Hash>,
+    /// Merkle root over `chunks`, committing to the whole ordered sequence.
+    /// A content id for the data itself, and the anchor for inclusion proofs
+    /// and sync deltas. Optional so manifests written before it stay readable;
+    /// recompute with `barme_core::merkle::root(&chunks)` when absent.
+    ///
+    /// `skip_serializing_if` is load-bearing: object_id is the hash of the
+    /// manifest's JSON, so if `None` serialized as `null` it would change the
+    /// id of every manifest written before this field existed and break their
+    /// integrity check. Omitting `None` keeps old manifests byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merkle_root: Option<Hash>,
 }
 
 /// Present when fidelity is perceptual: records how faithful the result is,

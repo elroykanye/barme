@@ -93,6 +93,7 @@ mod tests {
             chunking: Chunking {
                 algo: Some("fastcdc".into()),
                 chunks: vec![Hash::of(b"c1"), Hash::of(b"c2")],
+                merkle_root: None,
             },
             quality: Quality::default(),
             tenant: "acme".into(),

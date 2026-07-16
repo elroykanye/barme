@@ -5,6 +5,7 @@ mod bucket;
 mod hash;
 mod key;
 mod manifest;
+pub mod merkle;
 mod webhook;
 
 pub use annotation::Annotation;

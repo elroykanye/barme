@@ -48,6 +48,7 @@ fn write_object(store: &Store, bucket: &str, key: &str, data: &[u8]) -> Hash {
         chunking: Chunking {
             algo: Some("fastcdc".into()),
             chunks: chunk_hashes,
+            merkle_root: None,
         },
         quality: Quality::default(),
         tenant: "acme".into(),
