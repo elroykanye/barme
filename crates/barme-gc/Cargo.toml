@@ -10,4 +10,5 @@ barme-store.workspace = true
 
 [dev-dependencies]
 barme-chunk.workspace = true
+serde_json.workspace = true
 tempfile = "3"
