@@ -2,8 +2,6 @@
 
 A content-addressed object store that speaks S3.
 
-> Status: design stage. Nothing is built yet. The architecture is settled; the code isn't written.
-
 ## About
 
 Barme stores objects by content, not by filename. On upload, a file is split into content-defined chunks, and every chunk and every object is addressed by its hash. An object is a merkle tree of those hashes, which is roughly how git handles blobs.
@@ -50,14 +48,14 @@ JPEG XL's lossless transcode is worth calling out: it re-encodes an existing JPE
 
 A vector index keyed by content hash lets you query objects by meaning, text or image, rather than by key. It's built asynchronously after write, never on the write path, and it's disposable, since it can be rebuilt from the stored bytes at any time. Because it's keyed on content hash, repeated content is only ever indexed once.
 
-## Roadmap
+## Components
 
-- [ ] Storage engine: chunking, hashing, merkle manifests
-- [ ] Garbage collection (mark-and-sweep with a grace period)
-- [ ] S3 API
-- [ ] Compression tiers
-- [ ] Native API
-- [ ] Semantic layer
+- Storage engine: chunking, hashing, merkle manifests
+- Garbage collection (mark-and-sweep with a grace period)
+- S3 API
+- Compression tiers
+- Native API
+- Semantic layer
 
 ## Documentation
 
