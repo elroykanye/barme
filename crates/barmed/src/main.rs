@@ -22,7 +22,6 @@ mod ui {
     use axum::{
         http::{header, Uri},
         response::{IntoResponse, Response},
-        routing::get,
         Router,
     };
     use rust_embed::RustEmbed;
@@ -32,7 +31,7 @@ mod ui {
     struct Assets;
 
     pub fn router() -> Router {
-        Router::new().fallback(get(serve))
+        Router::new().fallback(serve)
     }
 
     async fn serve(uri: Uri) -> Response {
