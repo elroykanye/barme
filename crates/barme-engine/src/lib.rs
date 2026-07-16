@@ -112,7 +112,22 @@ impl Engine {
     /// Write an object and return its object_id. Prior versions of the same
     /// key stay resolvable; only the pointer moves.
     pub fn put(&self, bucket: &str, key: &str, data: &[u8], content_type: &str) -> Result<Hash> {
-        let codec = self.write_codec()?;
+        // Effective policy: the pot's overrides, falling back to the server
+        // default. This is where per-pot config actually takes effect.
+        let cfg = self.store.meta.config(bucket)?;
+        let codec_name = cfg.codec.clone().unwrap_or_else(|| self.policy.codec.clone());
+        let level = cfg.zstd_level.unwrap_or(self.policy.zstd_level);
+        let fidelity = match cfg.fidelity.as_deref() {
+            Some("perceptual") => Fidelity::Perceptual,
+            _ => Fidelity::Exact,
+        };
+        let route = if cfg.route_by_content_type && content_type.starts_with("image/") {
+            Route::Image
+        } else {
+            Route::Blob
+        };
+
+        let codec = build_codec(&codec_name, level)?;
 
         let mut chunks = Vec::new();
         let mut stored_size = 0u64;
@@ -132,12 +147,12 @@ impl Engine {
                 content_type: content_type.to_string(),
             },
             storage: Storage {
-                route: Route::Blob,
-                fidelity: Fidelity::Exact,
-                codec: self.policy.codec.clone(),
-                codec_params: self.codec_params(),
+                route,
+                fidelity,
+                codec: codec_name.clone(),
+                codec_params: codec_params(&codec_name, level),
                 stored_size_bytes: stored_size,
-                reconstructs_original: true,
+                reconstructs_original: fidelity == Fidelity::Exact,
             },
             chunking: Chunking {
                 algo: Some("fastcdc".into()),
@@ -313,19 +328,20 @@ impl Engine {
         Ok(out)
     }
 
-    fn write_codec(&self) -> Result<Box<dyn Codec>> {
-        match self.policy.codec.as_str() {
-            "none" => Ok(Box::new(Raw)),
-            "zstd" => Ok(Box::new(Zstd::new(self.policy.zstd_level))),
-            other => Err(CodecError::Unknown(other.to_string()).into()),
-        }
-    }
+}
 
-    fn codec_params(&self) -> serde_json::Value {
-        match self.policy.codec.as_str() {
-            "zstd" => serde_json::json!({ "level": self.policy.zstd_level }),
-            _ => serde_json::json!({}),
-        }
+fn build_codec(name: &str, level: i32) -> Result<Box<dyn Codec>> {
+    match name {
+        "none" => Ok(Box::new(Raw)),
+        "zstd" => Ok(Box::new(Zstd::new(level))),
+        other => Err(CodecError::Unknown(other.to_string()).into()),
+    }
+}
+
+fn codec_params(name: &str, level: i32) -> serde_json::Value {
+    match name {
+        "zstd" => serde_json::json!({ "level": level }),
+        _ => serde_json::json!({}),
     }
 }
 

@@ -74,6 +74,7 @@ pub fn app(state: AppState) -> Router {
         .route("/pots/{bucket}", delete(delete_bucket))
         .route("/pots/{bucket}/rename", post(rename_bucket))
         .route("/pots/{bucket}/visibility", post(set_visibility))
+        .route("/pots/{bucket}/config", get(get_config).put(put_config))
         .route("/pots/{bucket}/objects", get(list_objects))
         .route("/ops/copy", post(copy_object))
         .route("/ops/move", post(move_object))
@@ -214,6 +215,26 @@ async fn set_visibility(
             public_read: vis.public_read,
         },
     )?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_config(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    Ok(Json(st.engine.bucket_config(&bucket)?).into_response())
+}
+
+async fn put_config(
+    State(st): State<AppState>,
+    Path(bucket): Path<String>,
+    headers: HeaderMap,
+    Json(cfg): Json<BucketConfig>,
+) -> Result<Response, NativeError> {
+    require_owner(&principal(&st, &headers))?;
+    st.engine.set_bucket_config(&bucket, &cfg)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
