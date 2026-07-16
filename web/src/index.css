@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/* Dark dev-tool palette. These become utilities: bg-panel, text-muted, etc. */
+@theme {
+  --color-bg: #0b0d11;
+  --color-panel: #101318;
+  --color-elevated: #161a21;
+  --color-border: #232a33;
+  --color-text: #e6e9ef;
+  --color-muted: #8b93a1;
+  --color-faint: #5b6472;
+  --color-accent: #7c6cff;
+  --color-accent-ink: #ffffff;
+  --color-ok: #43d17a;
+  --color-warn: #f2b34b;
+  --color-danger: #f16d6d;
+
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
+}
+
+/* Thin, unobtrusive scrollbars to match the aesthetic. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 8px;
+}
