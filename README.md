@@ -57,6 +57,25 @@ A vector index keyed by content hash lets you query objects by meaning, text or 
 - Native API
 - Semantic layer
 
+## Running
+
+Backend only, fast, no Node needed:
+
+    cargo run -p barmed          # S3 on :9000, native API on :7373
+
+With the web console baked in:
+
+    cargo run -p barmed --features ui   # also serves the console on :7374
+
+The `ui` feature builds the React app in `web/` (needs Node) and embeds the
+output into the binary, so a release build is a single self-contained executable:
+
+    cargo build --release -p barmed --features ui
+
+Credentials are optional. Set `BARME_ACCESS_KEY` and `BARME_SECRET_KEY` to
+enforce auth (SigV4 on the S3 door, Basic on the native door); leave them unset
+to run open. Set `BARME_EMBED_URL` to enable semantic search.
+
 ## Documentation
 
 Full design notes in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).

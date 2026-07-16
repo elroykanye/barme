@@ -8,6 +8,11 @@ license.workspace = true
 name = "barmed"
 path = "src/main.rs"
 
+[features]
+# Build the React console and embed it into the binary, served on :7374.
+# Off by default so plain `cargo build` needs no Node toolchain.
+ui = ["dep:axum", "dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
 barme-engine.workspace = true
 barme-s3.workspace = true
@@ -17,3 +22,6 @@ barme-auth.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+axum = { workspace = true, optional = true }
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }

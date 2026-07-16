@@ -15,6 +15,51 @@ use barme_native::AppState;
 use barme_s3::S3State;
 use barme_semantic::{HttpEmbedder, MemoryIndex, Semantic};
 
+/// The embedded web console, compiled in only under the `ui` feature. The React
+/// build output is baked into the binary and served with an SPA fallback.
+#[cfg(feature = "ui")]
+mod ui {
+    use axum::{
+        http::{header, Uri},
+        response::{IntoResponse, Response},
+        routing::get,
+        Router,
+    };
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "../../web/dist"]
+    struct Assets;
+
+    pub fn router() -> Router {
+        Router::new().fallback(get(serve))
+    }
+
+    async fn serve(uri: Uri) -> Response {
+        let path = uri.path().trim_start_matches('/');
+        let path = if path.is_empty() { "index.html" } else { path };
+
+        if let Some(file) = Assets::get(path) {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            return (
+                [(header::CONTENT_TYPE, mime.as_ref())],
+                file.data.into_owned(),
+            )
+                .into_response();
+        }
+
+        // Unknown path: hand back index.html so client-side routing works.
+        match Assets::get("index.html") {
+            Some(index) => (
+                [(header::CONTENT_TYPE, "text/html")],
+                index.data.into_owned(),
+            )
+                .into_response(),
+            None => (axum::http::StatusCode::NOT_FOUND, "ui not built").into_response(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -82,9 +127,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         creds,
     };
 
-    tokio::try_join!(
-        barme_s3::serve(s3_state, s3_addr),
-        barme_native::serve(native_state, native_addr),
-    )?;
+    let s3 = barme_s3::serve(s3_state, s3_addr);
+    let native = barme_native::serve(native_state, native_addr);
+
+    #[cfg(feature = "ui")]
+    {
+        let console_addr: SocketAddr = "0.0.0.0:7374".parse()?;
+        tracing::info!("console on {console_addr}");
+        let console = async move {
+            let listener = tokio::net::TcpListener::bind(console_addr).await?;
+            axum::serve(listener, ui::router()).await
+        };
+        tokio::try_join!(s3, native, console)?;
+    }
+    #[cfg(not(feature = "ui"))]
+    {
+        tokio::try_join!(s3, native)?;
+    }
     Ok(())
 }
