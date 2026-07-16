@@ -2,6 +2,7 @@
 
 interface ImportMetaEnv {
   readonly VITE_BARME_API?: string;
+  readonly VITE_BARME_CDN?: string;
 }
 
 interface ImportMeta {

@@ -1,19 +1,36 @@
 import { useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Globe, Lock, Trash2, Upload, X } from "lucide-react";
-import { api, downloadToDisk } from "@/lib/api";
+import {
+  Copy,
+  Download,
+  FolderInput,
+  Globe,
+  Link2,
+  Lock,
+  Pencil,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
+import { api, cdnUrl, downloadToDisk, publicUrl } from "@/lib/api";
 import { humanSize, shortHash } from "@/lib/format";
+import { useToast } from "@/lib/toast";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 
 export function BucketView() {
   const { bucket = "" } = useParams();
+  const navigate = useNavigate();
+  const toast = useToast();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [filter, setFilter] = useState("");
 
   const objects = useQuery({
     queryKey: ["objects", bucket],
@@ -22,27 +39,55 @@ export function BucketView() {
   const buckets = useQuery({ queryKey: ["buckets"], queryFn: api.listBuckets });
   const info = buckets.data?.find((b) => b.name === bucket);
 
+  const refreshAll = () => {
+    qc.invalidateQueries({ queryKey: ["objects", bucket] });
+    qc.invalidateQueries({ queryKey: ["buckets"] });
+    qc.invalidateQueries({ queryKey: ["stats"] });
+  };
+
   const upload = useMutation({
     mutationFn: async (files: FileList) => {
       for (const f of Array.from(files)) await api.upload(bucket, f.name, f);
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["objects", bucket] });
-      qc.invalidateQueries({ queryKey: ["buckets"] });
+      refreshAll();
+      toast("Uploaded", "success");
     },
-  });
-  const remove = useMutation({
-    mutationFn: (key: string) => api.remove(bucket, key),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["objects", bucket] });
-      qc.invalidateQueries({ queryKey: ["buckets"] });
-      setSelected(null);
-    },
+    onError: () => toast("Upload failed", "error"),
   });
   const toggle = useMutation({
     mutationFn: (pub: boolean) => api.setVisibility(bucket, pub),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["buckets"] }),
   });
+
+  function renameBucket() {
+    const name = window.prompt("Rename bucket to", bucket)?.trim();
+    if (!name || name === bucket) return;
+    api
+      .renameBucket(bucket, name)
+      .then(() => {
+        qc.invalidateQueries({ queryKey: ["buckets"] });
+        toast("Bucket renamed", "success");
+        navigate(`/b/${encodeURIComponent(name)}`);
+      })
+      .catch(() => toast("Rename failed (name taken?)", "error"));
+  }
+
+  function deleteBucket() {
+    if (!window.confirm(`Delete bucket "${bucket}" and all its objects?`)) return;
+    api
+      .deleteBucket(bucket)
+      .then(() => {
+        qc.invalidateQueries({ queryKey: ["buckets"] });
+        toast("Bucket deleted", "success");
+        navigate("/");
+      })
+      .catch(() => toast("Delete failed", "error"));
+  }
+
+  const rows = (objects.data ?? []).filter((o) =>
+    o.key.toLowerCase().includes(filter.toLowerCase()),
+  );
 
   return (
     <div className="flex h-full">
@@ -59,9 +104,9 @@ export function BucketView() {
           if (e.dataTransfer.files.length) upload.mutate(e.dataTransfer.files);
         }}
       >
-        <div className="mb-5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold tracking-tight">{bucket}</h1>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <h1 className="truncate text-lg font-semibold tracking-tight">{bucket}</h1>
             {info &&
               (info.public_read ? (
                 <Badge tone="ok">
@@ -75,12 +120,18 @@ export function BucketView() {
                 </Badge>
               ))}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {info && (
-              <Button variant="outline" onClick={() => toggle.mutate(!info.public_read)}>
+              <Button variant="ghost" onClick={() => toggle.mutate(!info.public_read)}>
                 {info.public_read ? "Make private" : "Make public"}
               </Button>
             )}
+            <Button variant="ghost" onClick={renameBucket} title="Rename bucket">
+              <Pencil className="size-4" />
+            </Button>
+            <Button variant="danger" onClick={deleteBucket} title="Delete bucket">
+              <Trash2 className="size-4" />
+            </Button>
             <Button onClick={() => fileRef.current?.click()}>
               <Upload className="size-4" />
               Upload
@@ -95,6 +146,16 @@ export function BucketView() {
           </div>
         </div>
 
+        <div className="relative mb-4 max-w-xs">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-faint" />
+          <Input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter by key…"
+            className="pl-9"
+          />
+        </div>
+
         <div
           className={cn(
             "overflow-hidden rounded-xl border transition-colors",
@@ -103,9 +164,9 @@ export function BucketView() {
         >
           {objects.isLoading ? (
             <p className="p-6 text-sm text-muted">Loading…</p>
-          ) : !objects.data?.length ? (
+          ) : !rows.length ? (
             <div className="p-12 text-center text-sm text-muted">
-              Empty. Drop files here, or use Upload.
+              {filter ? "No keys match." : "Empty. Drop files here, or use Upload."}
             </div>
           ) : (
             <table className="w-full text-sm">
@@ -118,7 +179,7 @@ export function BucketView() {
                 </tr>
               </thead>
               <tbody>
-                {objects.data.map((o) => (
+                {rows.map((o) => (
                   <tr
                     key={o.key}
                     onClick={() => setSelected(o.key)}
@@ -154,8 +215,9 @@ export function BucketView() {
         <ObjectPanel
           bucket={bucket}
           objectKey={selected}
+          isPublic={info?.public_read ?? false}
           onClose={() => setSelected(null)}
-          onDelete={() => remove.mutate(selected)}
+          onChanged={refreshAll}
         />
       )}
     </div>
@@ -165,14 +227,17 @@ export function BucketView() {
 function ObjectPanel({
   bucket,
   objectKey,
+  isPublic,
   onClose,
-  onDelete,
+  onChanged,
 }: {
   bucket: string;
   objectKey: string;
+  isPublic: boolean;
   onClose: () => void;
-  onDelete: () => void;
+  onChanged: () => void;
 }) {
+  const toast = useToast();
   const manifest = useQuery({
     queryKey: ["manifest", bucket, objectKey],
     queryFn: () => api.manifest(bucket, objectKey),
@@ -183,8 +248,62 @@ function ObjectPanel({
   });
   const m = manifest.data;
 
+  const ct = m?.original.content_type ?? "";
+  const isImage = ct.startsWith("image/");
+  const isText = ct.startsWith("text/") || ct.includes("json") || ct.includes("xml");
+
+  const text = useQuery({
+    queryKey: ["preview", bucket, objectKey],
+    queryFn: async () => (await api.download(bucket, objectKey)).text(),
+    enabled: isText,
+  });
+
+  function copy(url: string, label: string) {
+    navigator.clipboard
+      .writeText(url)
+      .then(() => toast(`${label} copied`, "success"))
+      .catch(() => toast("Copy failed", "error"));
+  }
+
+  function rename() {
+    const to = window.prompt("Rename key to", objectKey)?.trim();
+    if (!to || to === objectKey) return;
+    api.moveObject(bucket, objectKey, bucket, to).then(() => {
+      toast("Renamed", "success");
+      onChanged();
+      onClose();
+    });
+  }
+
+  function move(copyInstead: boolean) {
+    const dest = window.prompt(
+      `${copyInstead ? "Copy" : "Move"} to (bucket/key)`,
+      `${bucket}/${objectKey}`,
+    )?.trim();
+    if (!dest) return;
+    const i = dest.indexOf("/");
+    if (i < 1) return toast("Use bucket/key", "error");
+    const tb = dest.slice(0, i);
+    const tk = dest.slice(i + 1);
+    const fn = copyInstead ? api.copyObject : api.moveObject;
+    fn(bucket, objectKey, tb, tk).then(() => {
+      toast(copyInstead ? "Copied" : "Moved", "success");
+      onChanged();
+      if (!copyInstead) onClose();
+    });
+  }
+
+  function del() {
+    if (!window.confirm(`Delete "${objectKey}"?`)) return;
+    api.remove(bucket, objectKey).then(() => {
+      toast("Deleted", "success");
+      onChanged();
+      onClose();
+    });
+  }
+
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-l border-border bg-panel">
+    <aside className="flex w-96 shrink-0 flex-col border-l border-border bg-panel">
       <div className="flex h-14 items-center justify-between border-b border-border px-4">
         <span className="truncate text-sm font-medium">{objectKey}</span>
         <button onClick={onClose} className="text-muted transition-colors hover:text-text">
@@ -193,6 +312,19 @@ function ObjectPanel({
       </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+        {isImage && m && (
+          <img
+            src={cdnUrl(m.object_id)}
+            alt={objectKey}
+            className="max-h-56 w-full rounded-lg border border-border object-contain"
+          />
+        )}
+        {isText && text.data !== undefined && (
+          <pre className="max-h-56 overflow-auto rounded-lg border border-border bg-bg p-3 text-xs text-muted">
+            {text.data.slice(0, 4000)}
+          </pre>
+        )}
+
         {m && (
           <>
             <div className="flex flex-wrap gap-1.5">
@@ -209,6 +341,24 @@ function ObjectPanel({
               <Row k="Chunks" v={String(m.chunking.chunks.length)} />
               <Row k="Object id" v={shortHash(m.object_id)} mono />
             </dl>
+
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wider text-faint">Share</div>
+              <button
+                onClick={() => copy(cdnUrl(m.object_id), "Immutable link")}
+                className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-xs text-muted hover:bg-elevated hover:text-text"
+              >
+                <Link2 className="size-3.5" /> Copy immutable CDN link
+              </button>
+              {isPublic && (
+                <button
+                  onClick={() => copy(publicUrl(bucket, objectKey), "Public link")}
+                  className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-xs text-muted hover:bg-elevated hover:text-text"
+                >
+                  <Globe className="size-3.5" /> Copy public link
+                </button>
+              )}
+            </div>
           </>
         )}
 
@@ -230,13 +380,25 @@ function ObjectPanel({
         </div>
       </div>
 
-      <div className="flex gap-2 border-t border-border p-4">
-        <Button variant="outline" className="flex-1" onClick={() => void downloadToDisk(bucket, objectKey)}>
-          <Download className="size-4" />
-          Download
-        </Button>
-        <Button variant="danger" onClick={onDelete}>
+      <div className="space-y-2 border-t border-border p-4">
+        <div className="flex gap-2">
+          <Button variant="outline" className="flex-1" onClick={() => void downloadToDisk(bucket, objectKey)}>
+            <Download className="size-4" />
+            Download
+          </Button>
+          <Button variant="outline" onClick={rename} title="Rename">
+            <Pencil className="size-4" />
+          </Button>
+          <Button variant="outline" onClick={() => move(false)} title="Move">
+            <FolderInput className="size-4" />
+          </Button>
+          <Button variant="outline" onClick={() => move(true)} title="Copy">
+            <Copy className="size-4" />
+          </Button>
+        </div>
+        <Button variant="danger" className="w-full" onClick={del}>
           <Trash2 className="size-4" />
+          Delete
         </Button>
       </div>
     </aside>

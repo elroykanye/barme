@@ -2,8 +2,17 @@
 // held in localStorage since this console runs on the owner's own machine.
 
 const BASE = import.meta.env.VITE_BARME_API ?? "http://localhost:7373";
+const CDN = import.meta.env.VITE_BARME_CDN ?? "http://localhost:7375";
 
 export type Creds = { access: string; secret: string };
+
+export interface Stats {
+  buckets: number;
+  objects: number;
+  logical_bytes: number;
+  physical_bytes: number;
+  unique_chunks: number;
+}
 
 export interface BucketInfo {
   name: string;
@@ -135,7 +144,55 @@ export const api = {
     });
     return res.status === 501 ? [] : res.json();
   },
+
+  async stats(): Promise<Stats> {
+    return (await req("/stats")).json();
+  },
+
+  async renameBucket(bucket: string, newName: string): Promise<void> {
+    await req(`/buckets/${encodeURIComponent(bucket)}/rename`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_name: newName }),
+    });
+  },
+
+  async deleteBucket(bucket: string): Promise<void> {
+    await req(`/buckets/${encodeURIComponent(bucket)}`, { method: "DELETE" });
+  },
+
+  async moveObject(fromB: string, fromK: string, toB: string, toK: string): Promise<void> {
+    await ops("/ops/move", fromB, fromK, toB, toK);
+  },
+
+  async copyObject(fromB: string, fromK: string, toB: string, toK: string): Promise<void> {
+    await ops("/ops/copy", fromB, fromK, toB, toK);
+  },
 };
+
+async function ops(path: string, fromB: string, fromK: string, toB: string, toK: string) {
+  await req(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from_bucket: fromB,
+      from_key: fromK,
+      to_bucket: toB,
+      to_key: toK,
+    }),
+  });
+}
+
+/** Immutable public URL for an object by its content hash (caches forever). */
+export function cdnUrl(objectId: string): string {
+  return `${CDN}/cdn/${objectId}`;
+}
+
+/** Friendly public URL, only resolves if the bucket is public. */
+export function publicUrl(bucket: string, key: string): string {
+  const k = key.split("/").map(encodeURIComponent).join("/");
+  return `${CDN}/public/${encodeURIComponent(bucket)}/${k}`;
+}
 
 /** Trigger a browser download for an object. */
 export async function downloadToDisk(bucket: string, key: string) {
