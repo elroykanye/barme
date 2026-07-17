@@ -157,6 +157,12 @@ impl Engine {
         })
     }
 
+    /// Temp files reaped on open because the previous run was killed mid-write.
+    /// Zero after a clean shutdown; non-zero is a benign crash-recovery signal.
+    pub fn recovered_temp(&self) -> usize {
+        self.store.recovered_temp
+    }
+
     /// Register a hook to run after every successful write. Set it before the
     /// engine is shared. The hook must be cheap and non-blocking; the intended
     /// use is to drop the event on a queue for a background worker.

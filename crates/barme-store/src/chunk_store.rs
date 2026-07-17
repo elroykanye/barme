@@ -82,6 +82,12 @@ impl ChunkStore {
             for entry in std::fs::read_dir(shard.path())? {
                 let name = entry?.file_name();
                 let hex = name.to_string_lossy();
+                // Skip anything that isn't a chunk file: a temp file from an
+                // in-flight or crashed write, or any stray dotfile. Chunk names
+                // are bare hex, so a leading dot is enough to tell them apart.
+                if hex.starts_with('.') {
+                    continue;
+                }
                 out.push(format!("blake3:{hex}").parse()?);
             }
         }
@@ -103,7 +109,11 @@ impl ChunkStore {
                 continue;
             }
             for entry in std::fs::read_dir(shard.path())? {
-                total += entry?.metadata()?.len();
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue; // temp/stray file, not a chunk
+                }
+                total += entry.metadata()?.len();
             }
         }
         Ok(total)

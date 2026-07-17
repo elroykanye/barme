@@ -28,7 +28,7 @@ Store and read an object:
 ## Tags
 
 - `latest` — most recent release
-- `0.3.0`, `0.3.x` — pinned versions
+- `0.4.0`, `0.4.x` — pinned versions
 
 ## Image
 
@@ -47,9 +47,10 @@ Set with environment variables or a mounted `barme.toml`:
 ## Status
 
 Alpha. Works end to end, but it's early: uploads and downloads stream (memory
-stays flat regardless of object size), but key secrets are stored in the clear
-and it ships with a default login you should change. Don't put anything you
-can't lose in it yet.
+stays flat regardless of object size), and an acknowledged write survives a hard
+kill (writes are fsync-durable, the daemon recovers on restart). Key secrets are
+still stored in the clear and it ships with a default login you should change.
+Don't put anything you can't lose in it yet.
 
 ## Links
 

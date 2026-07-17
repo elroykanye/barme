@@ -1,26 +1,34 @@
-# barme 0.3.0
+# barme 0.4.0
 
-Streaming. Objects now flow through barme a chunk at a time instead of being
-held whole in memory, so the server's memory no longer scales with object size.
+Durability. A write that barme acknowledged now survives a hard kill of the
+process, byte-for-byte, and the server restarts clean on the same data dir. This
+is the first of the changes that make a v1 mean something.
 
 ## What changed
 
-- **Streaming uploads.** A PUT is chunked as it arrives and each chunk is stored
-  as it's cut — the whole object is never buffered. Verified: a **1.5 GB upload
-  into a 768 MB container** peaks at about **5 MiB** of resident memory. On 0.2.0
-  the same box died around 500 MB.
-- **Streaming downloads.** A GET streams the object out one chunk at a time, each
-  chunk verifying its own content hash on the way. The same 1.5 GB object reads
-  back **byte-exact** at about **3 MiB** peak. `verify` and fetch-by-hash stream
-  the same way, so neither buffers a large object either.
-- **Flat under concurrency.** Eight concurrent 200 MB uploads peaked around
-  6 MiB total — memory tracks in-flight chunks, not object sizes.
-- **The upload cap still applies.** `max_upload_bytes` (default 512 MiB) bounds a
-  single object; over it is refused. Streaming and buffered writes produce the
-  identical object, so a streamed upload dedups against a buffered one.
-- **Back on a tiny Alpine image** (~18 MB), reverting 0.2.0's debian-slim. Alpine
-  keeps a shell for `docker exec` and stays small; see the Dockerfile note on the
-  one accepted busybox CVE (an unreachable `wget` path).
+- **Durable atomic writes.** Every store write already synced the file's contents
+  and swapped it in with an atomic rename. It now also **fsyncs the containing
+  directory after the rename**, so the rename itself survives power loss — a
+  synced file whose directory entry was lost is still a lost file. New shard
+  directories sync their parent too. (No-op on Windows, where a directory isn't
+  fsync-able and NTFS journals its own metadata; Linux is the deploy target.)
+- **Crash recovery on startup.** A process killed between creating a temp file and
+  renaming it used to strand that temp file in a shard directory — and because
+  chunk names are hashes, the stray file could trip the garbage collector's walk.
+  Writes now use a known temp prefix, the shard walkers skip anything that isn't a
+  chunk, and **startup reaps any leftover temp files** and logs how many. A clean
+  shutdown recovers zero.
+- **Proven, not asserted.** A new `kill -9` harness (`scripts/crash-test.sh`) runs
+  rounds of concurrent uploads, hard-kills the daemon mid-write, restarts, and
+  checks that every acknowledged object still downloads and matches its hash.
+  Verified: **8 crash cycles, 47 acknowledged objects, zero lost or corrupted**,
+  with recovery reaping stranded temp files every round.
+
+## Upgrading
+
+Drop-in. On-disk format is unchanged; an existing 0.3.0 data dir opens as-is. The
+first start after an unclean 0.3.0 shutdown will log a one-line recovery notice if
+it reaps any temp files.
 
 ## Running it
 
@@ -32,15 +40,14 @@ CDN on `:7375`. Default login `barme:barme`; override with `BARME_ACCESS_KEY` /
 ## Docker
 
 ```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.3.0
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.0
 ```
 
 ## Known limits
 
-- Alpha. Formats and on-disk layout may still change.
-- An upload past `max_upload_bytes` is refused; with `Expect: 100-continue` a
-  client sees a clean 413, otherwise the connection is reset once the limit is
-  passed. The server stays up either way.
+- Alpha. Formats and on-disk layout may still change before v1.
+- Secret keys are still stored in the clear and the default `barme/barme` login
+  still works out of the box — both land in the next release. Don't expose it yet.
 - A pot name plus key must encode to under 255 bytes (about 120 key bytes for a
   short pot).
 - `barmed` binds IPv4 (`0.0.0.0`); on a dual-stack host reach it via `127.0.0.1`

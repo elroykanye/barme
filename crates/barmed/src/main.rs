@@ -259,6 +259,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         policy_name: config.default_policy.policy_name.clone(),
     };
     let mut engine = Engine::open(&config.data_dir, policy)?;
+    if engine.recovered_temp() > 0 {
+        tracing::warn!(
+            "recovered from unclean shutdown: reaped {} temp file(s) from interrupted writes",
+            engine.recovered_temp()
+        );
+    }
 
     let semantic = match config.embed_url.clone() {
         Some(url) => {

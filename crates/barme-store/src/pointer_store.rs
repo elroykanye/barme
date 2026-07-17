@@ -80,7 +80,13 @@ impl PointerStore {
         let mut keys = Vec::new();
         for entry in entries {
             let name = entry?.file_name();
-            let bytes = hex::decode(name.to_string_lossy().as_bytes())
+            let name = name.to_string_lossy();
+            // A crashed pointer write can strand a temp file in the bucket dir.
+            // Pointer filenames are hex, so a leading dot marks a non-pointer.
+            if name.starts_with('.') {
+                continue;
+            }
+            let bytes = hex::decode(name.as_bytes())
                 .map_err(|_| StoreError::BadBucket(bucket.to_string()))?;
             keys.push(String::from_utf8_lossy(&bytes).into_owned());
         }
