@@ -20,6 +20,11 @@ pub struct Config {
     /// How often the GC sweep runs.
     pub gc_interval_secs: u64,
     pub default_policy: PolicyConfig,
+    /// Largest upload accepted on the S3 and native doors, in bytes. Uploads are
+    /// buffered in memory, so this caps per-request memory and stops a large
+    /// upload from OOM-killing the process. Rejected with `413 Payload Too
+    /// Large`. Size it below the memory available to the server.
+    pub max_upload_bytes: usize,
     /// Bootstrap owner credential. Multi-key management lives on top of this.
     pub credentials: Option<Credential>,
     pub embed_url: Option<String>,
@@ -53,6 +58,10 @@ impl Default for Config {
             gc_grace_secs: 86_400,
             gc_interval_secs: 3_600,
             default_policy: PolicyConfig::default(),
+            // 512 MiB. Generous for real objects, but bounded so a huge upload
+            // can't exhaust memory. Raise it in barme.toml if your host has the
+            // RAM and you push bigger blobs.
+            max_upload_bytes: 512 * 1024 * 1024,
             // A known default so the door isn't open out of the box. Override in
             // barme.toml or via BARME_ACCESS_KEY / BARME_SECRET_KEY.
             credentials: Some(Credential {
@@ -107,6 +116,11 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BARME_EMBED_MODEL") {
             self.embed_model = v;
+        }
+        if let Ok(v) = std::env::var("BARME_MAX_UPLOAD_BYTES") {
+            if let Ok(n) = v.parse() {
+                self.max_upload_bytes = n;
+            }
         }
         if let (Ok(access), Ok(secret)) = (
             std::env::var("BARME_ACCESS_KEY"),

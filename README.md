@@ -16,7 +16,7 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:0.1.0
+      -v barme:/data elroykanye/barme:0.2.0
 
 Console on http://localhost:7374, login `barme` / `barme`. Then store something:
 
@@ -98,10 +98,11 @@ search. Config, ports, and the full API are covered in
 
 ## Status
 
-Alpha (v0.1.0). It works end to end, but it's early: large uploads are buffered
-in memory (no streaming multipart yet), key secrets are stored in the clear
-(AWS-style), and it ships with a default `barme` / `barme` login you should
-change. Don't put anything you can't lose in it yet.
+Alpha (v0.2.0). It works end to end, but it's early: uploads are buffered in
+memory and capped (`max_upload_bytes`, default 512 MiB) rather than streamed,
+key secrets are stored in the clear (AWS-style), and it ships with a default
+`barme` / `barme` login you should change. Don't put anything you can't lose in
+it yet.
 
 ## License
 

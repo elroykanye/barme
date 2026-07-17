@@ -40,7 +40,11 @@ impl From<EngineError> for S3Error {
 
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+        let status = match self.0 {
+            EngineError::InvalidKey(..) => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, self.0.to_string()).into_response()
     }
 }
 
@@ -49,17 +53,21 @@ impl IntoResponse for S3Error {
 #[derive(Clone)]
 pub struct S3State {
     pub engine: Arc<Engine>,
+    /// Largest accepted upload body, in bytes. Enforced by the router.
+    pub max_upload_bytes: usize,
 }
 
 /// The router, decoupled from any port so tests can drive it directly.
 pub fn app(state: S3State) -> Router {
+    let max_upload = state.max_upload_bytes;
     Router::new()
         .route("/{bucket}/{*key}", put(put_object))
         .route("/{bucket}/{*key}", get(get_object))
         .route("/{bucket}/{*key}", delete(delete_object))
         // HEAD shares the GET route in axum; register it explicitly for clarity.
         .route("/{bucket}/{*key}", axum::routing::head(head_object))
-        .layer(axum::extract::DefaultBodyLimit::disable())
+        // Bound the buffered upload body; over the limit gets 413.
+        .layer(axum::extract::DefaultBodyLimit::max(max_upload))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
@@ -214,6 +222,7 @@ mod tests {
         let path = dir.keep();
         S3State {
             engine: Arc::new(Engine::open(path, barme_engine::Policy::default()).unwrap()),
+            max_upload_bytes: 512 * 1024 * 1024,
         }
     }
 

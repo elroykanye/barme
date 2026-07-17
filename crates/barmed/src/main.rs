@@ -366,11 +366,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let s3_state = S3State {
         engine: engine.clone(),
+        max_upload_bytes: config.max_upload_bytes,
     };
     let native_state = AppState {
         engine: engine.clone(),
         semantic,
         cdn_base: http_base(&config.cdn_addr),
+        max_upload_bytes: config.max_upload_bytes,
         started: std::time::Instant::now(),
     };
 

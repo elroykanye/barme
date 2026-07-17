@@ -22,7 +22,7 @@ fn pseudo(len: usize, seed: u64) -> Vec<u8> {
 fn write_object(store: &Store, bucket: &str, key: &str, data: &[u8]) -> Hash {
     let mut chunk_hashes = Vec::new();
     for c in barme_chunk::chunk(data) {
-        let stored = store.chunks.put(&c.data).unwrap();
+        let stored = store.chunks.put(c.data).unwrap();
         assert_eq!(stored, c.hash, "stored address must match the chunk's hash");
         chunk_hashes.push(stored);
     }

@@ -1,30 +1,31 @@
-# barme 0.1.0
+# barme 0.2.0
 
-First tagged release. A content-addressed object store with two front doors and a Merkle spine.
+A hardening release. Same features as 0.1.0, but it no longer falls over under
+pressure. Found by actually stress-testing a memory-capped instance with large,
+concurrent, and hostile uploads.
 
-## What's in it
+## Fixed
 
-**Storage**
-- Content-defined chunking (FastCDC) with per-chunk dedup, blake3 addressing, and zstd compression. Nothing is stored twice.
-- Self-describing manifests: how an object was written travels with it, so defaults can change without breaking old data.
-- A Merkle tree over each object's chunks: a root that commits to the data, plus `log(n)` inclusion proofs.
-- Versioning like git: pointers move, history stays. Restore any version, diff or delta two of them, verify integrity by re-hashing.
+- **A large upload no longer OOM-kills the server.** Uploads are buffered in
+  memory, and the body was unbounded — a big enough one took the whole process
+  down. Uploads are now capped (`max_upload_bytes`, default 512 MiB) and
+  anything over the cap is rejected with `413 Payload Too Large` instead of
+  crashing. Set it in `barme.toml` or with `BARME_MAX_UPLOAD_BYTES`.
+- **Write memory roughly halved.** Chunking held a second full copy of every
+  object in memory during a write (~2× the object's size). It now works over
+  borrowed slices, so a write costs about 1× the object's size. A 200 MB upload
+  that used to peak near 450–650 MB now peaks near 200 MB.
+- **Over-long keys return `400`, not `500`.** Keys are encoded into a filename,
+  so a pot name plus key that exceeds the filesystem's 255-byte filename limit
+  used to fail deep in the store with a `500`. It's now checked up front and
+  rejected cleanly.
 
-**Access**
-- S3 door with AWS SigV4, for existing tools and SDKs.
-- Native JSON API with Basic auth for everything S3 can't say: version history, fetch-by-hash, proofs, sync, search.
-- CDN door for immutable by-hash and public pot delivery, with presigned share links.
-- Embedded web console, light and dark.
+## Unchanged and still solid
 
-**Sync**
-- Store-to-store replication over the native API: plan, ship only the chunks the far side lacks, import. Every transfer is hash-verified, and a manifest whose chunks are missing is refused.
-
-**Ops and config**
-- Multi-key auth with scopes; a default `barme:barme` owner when none is set.
-- Per-pot policy (codec, level, fidelity, visibility), lifecycle and retention, mark-and-sweep GC.
-- Webhooks, Prometheus `/metrics`, `/health`, structured request logs.
-- `barme.toml` plus environment overrides. Ports roll forward if one is already taken.
-- Optional semantic layer that proxies to your own embedder. No models run on the server.
+Under the same stress run, dedup held through 30 concurrent uploads of an
+identical blob, 80 versions of one key tracked correctly, 800 objects landed
+under 25-way parallelism, and unicode/space/`%`/`#`/path-traversal keys all
+stored as literal keys. Those already worked; the run confirmed it.
 
 ## Running it
 
@@ -34,20 +35,24 @@ Download the binary for your platform below, then:
 ./barmed
 ```
 
-Console on `http://localhost:7374`, API on `:7373` (docs at `:7373/docs`), S3 on `:9000`, CDN on `:7375`. Default login `barme:barme`, override with `BARME_ACCESS_KEY` / `BARME_SECRET_KEY`. `barmed --help` lists the flags.
+Console on `http://localhost:7374`, API on `:7373` (docs at `:7373/docs`), S3 on
+`:9000`, CDN on `:7375`. Default login `barme:barme`, override with
+`BARME_ACCESS_KEY` / `BARME_SECRET_KEY`. `barmed --help` lists the flags.
 
 ## Docker
 
 ```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.1.0
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.2.0
 ```
 
-A static musl binary on Alpine with CA roots only. Build it yourself with `docker build -t barme .` if you'd rather.
+Runtime image is now debian-slim (a shell for `docker exec`, no busybox).
 
 ## Known limits
 
 - Alpha. Formats and on-disk layout may still change.
-- Uploads buffer the whole body; streaming multipart comes later.
-- Image codecs (JPEG XL, AVIF) are routed but not yet transcoding; the blob path is complete.
-- The console doesn't surface proofs or cross-instance sync yet. The API does.
+- Uploads still buffer the whole body; the cap keeps that safe, but true
+  streaming (constant memory regardless of size) is the next release.
+- A pot name plus key must encode to under 255 bytes; for a short pot that's
+  about 120 key bytes.
+- Image codecs (JPEG XL, AVIF) are routed but not yet transcoding.
 - Single node.

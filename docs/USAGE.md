@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.1.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.2.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -76,6 +76,9 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     s3_addr      = "0.0.0.0:9000"
     cdn_addr     = "0.0.0.0:7375"
     console_addr = "0.0.0.0:7374"
+    # Largest accepted upload, in bytes. Uploads buffer in memory, so this caps
+    # per-request memory. Over it gets 413. Default 512 MiB.
+    max_upload_bytes = 536870912
 
     [credentials]
     access_key = "barme"
@@ -89,7 +92,9 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     # embed_url   = "http://localhost:11434/api/embeddings"
     # embed_model = "nomic-embed-text"
 
-Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`. If a port is already taken, barme rolls forward to the next free one.
+Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`, `BARME_MAX_UPLOAD_BYTES`. If a port is already taken, barme rolls forward to the next free one.
+
+Keys are encoded into a filename, so a pot name plus key must stay under the filesystem's 255-byte filename limit (about 120 key bytes for a short pot). Longer keys are rejected with `400`.
 
 Per-pot settings (compression, public read, lifecycle) are set over the API:
 

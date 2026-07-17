@@ -35,6 +35,8 @@ pub struct AppState {
     /// Public base URL of the CDN door, e.g. `http://localhost:7375`, used to
     /// build presigned share links.
     pub cdn_base: String,
+    /// Largest accepted upload body, in bytes. Enforced by the router.
+    pub max_upload_bytes: usize,
     /// When the process came up, for the health uptime reading.
     pub started: Instant,
 }
@@ -62,6 +64,9 @@ impl IntoResponse for NativeError {
             NativeError::Engine(e @ EngineError::Locked(..)) => {
                 (StatusCode::CONFLICT, e.to_string()).into_response()
             }
+            NativeError::Engine(e @ EngineError::InvalidKey(..)) => {
+                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+            }
             NativeError::Engine(e) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
@@ -76,6 +81,7 @@ impl IntoResponse for NativeError {
 }
 
 pub fn app(state: AppState) -> Router {
+    let max_upload = state.max_upload_bytes;
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -119,9 +125,9 @@ pub fn app(state: AppState) -> Router {
         .route("/sync/plan", post(sync_plan))
         .route("/sync/import/{bucket}/{*key}", post(import_object_handler))
         .route("/docs", get(docs))
-        // Allow large uploads; the whole body is buffered for now (streaming
-        // multipart lands later).
-        .layer(axum::extract::DefaultBodyLimit::disable())
+        // Cap the upload body: it's buffered in memory, so an unbounded body
+        // could OOM the process. Over the limit gets 413 Payload Too Large.
+        .layer(axum::extract::DefaultBodyLimit::max(max_upload))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -1066,6 +1072,7 @@ mod tests {
             engine: Arc::new(Engine::open(path, Policy::default()).unwrap()),
             semantic: None,
             cdn_base: "http://localhost:7375".into(),
+            max_upload_bytes: 512 * 1024 * 1024,
             started: Instant::now(),
         }
     }
@@ -1168,6 +1175,38 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn oversized_upload_is_rejected_with_413() {
+        let mut st = state(); // open mode
+        st.max_upload_bytes = 16; // tiny cap for the test
+        let res = send(
+            app(st),
+            Request::builder()
+                .method("PUT")
+                .uri("/objects/b/big")
+                .body(Body::from(vec![0u8; 1024])) // 1 KiB over a 16 B cap
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn overlong_key_is_rejected_with_400() {
+        let st = state(); // open mode
+        let key = "a".repeat(200); // over MAX_KEY_LEN
+        let res = send(
+            app(st),
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/objects/b/{key}"))
+                .body(Body::from("x"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

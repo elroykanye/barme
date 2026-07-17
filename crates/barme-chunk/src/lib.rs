@@ -15,25 +15,30 @@ pub const MIN_CHUNK: u32 = 16 * 1024;
 pub const AVG_CHUNK: u32 = 64 * 1024;
 pub const MAX_CHUNK: u32 = 256 * 1024;
 
-/// One chunk: its content address and the bytes it owns.
-#[derive(Debug, Clone)]
-pub struct Chunk {
+/// One chunk: its content address and a borrow of the bytes it covers. The
+/// slice points into the caller's buffer — no copy is made.
+#[derive(Debug, Clone, Copy)]
+pub struct Chunk<'a> {
     pub hash: Hash,
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
 }
 
-/// Split `data` into content-defined chunks. Concatenating the chunks back
-/// together reproduces `data` exactly.
-pub fn chunk(data: &[u8]) -> Vec<Chunk> {
-    FastCDC::new(data, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK)
-        .map(|c| {
-            let slice = &data[c.offset..c.offset + c.length];
-            Chunk {
-                hash: Hash::of(slice),
-                data: slice.to_vec(),
-            }
-        })
-        .collect()
+/// Split `data` into content-defined chunks, lazily. Concatenating the chunks
+/// back together reproduces `data` exactly.
+///
+/// This yields borrowed slices, so the whole input is never duplicated: the
+/// caller holds one copy of the bytes (the input), and each chunk is a view
+/// into it. An earlier version collected owned `Vec<u8>` per chunk, which held
+/// a second full copy of the object in memory during a write — doubling the
+/// footprint of every upload.
+pub fn chunk(data: &[u8]) -> impl Iterator<Item = Chunk<'_>> {
+    FastCDC::new(data, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK).map(move |c| {
+        let slice = &data[c.offset..c.offset + c.length];
+        Chunk {
+            hash: Hash::of(slice),
+            data: slice,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -54,21 +59,21 @@ mod tests {
             .collect()
     }
 
-    fn hashes(chunks: &[Chunk]) -> Vec<Hash> {
-        chunks.iter().map(|c| c.hash).collect()
+    fn hashes(data: &[u8]) -> Vec<Hash> {
+        chunk(data).map(|c| c.hash).collect()
     }
 
     #[test]
     fn reassembles_to_original() {
         let data = pseudo(512 * 1024, 1);
-        let rebuilt: Vec<u8> = chunk(&data).into_iter().flat_map(|c| c.data).collect();
+        let rebuilt: Vec<u8> = chunk(&data).flat_map(|c| c.data.to_vec()).collect();
         assert_eq!(rebuilt, data);
     }
 
     #[test]
     fn is_deterministic() {
         let data = pseudo(512 * 1024, 2);
-        assert_eq!(hashes(&chunk(&data)), hashes(&chunk(&data)));
+        assert_eq!(hashes(&data), hashes(&data));
     }
 
     #[test]
@@ -76,7 +81,7 @@ mod tests {
         // 512 KiB at a 64 KiB average should land well above a handful,
         // otherwise the locality test below wouldn't be meaningful.
         let data = pseudo(512 * 1024, 3);
-        assert!(chunk(&data).len() >= 4, "expected several chunks");
+        assert!(chunk(&data).count() >= 4, "expected several chunks");
     }
 
     /// The property the whole design rests on: an in-place edit in the middle
@@ -90,8 +95,8 @@ mod tests {
             *b = !*b;
         }
 
-        let h1 = hashes(&chunk(&v1));
-        let h2 = hashes(&chunk(&v2));
+        let h1 = hashes(&v1);
+        let h2 = hashes(&v2);
 
         // First and last chunks sit far from the edit and must survive.
         assert_eq!(h1.first(), h2.first(), "leading chunk should be unchanged");

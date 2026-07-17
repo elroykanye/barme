@@ -64,6 +64,31 @@ fn versions_accumulate_and_latest_wins() {
 }
 
 #[test]
+fn rejects_empty_and_overlong_keys() {
+    use barme_engine::{EngineError, MAX_NAME_BYTES};
+    let (_d, e) = engine("zstd");
+
+    // Empty key: rejected cleanly, not stored.
+    let err = e.put("b", "", b"x", "x").unwrap_err();
+    assert!(matches!(err, EngineError::InvalidKey(_)), "got {err:?}");
+
+    // Largest key that still fits for a 1-byte pot: the encoded filename is
+    // 2*pot + 2*key + len("_.json") = 2 + 2*key + 6, kept <= MAX_NAME_BYTES.
+    let maxk = (MAX_NAME_BYTES - 8) / 2;
+
+    // One byte over is rejected before touching the store...
+    let toolong = "a".repeat(maxk + 1);
+    let err = e.put("b", &toolong, b"x", "x").unwrap_err();
+    assert!(matches!(err, EngineError::InvalidKey(_)), "got {err:?}");
+
+    // ...but a key right at the limit is accepted and round-trips (this is the
+    // case that must not blow up deep in the store with ENAMETOOLONG).
+    let ok = "a".repeat(maxk);
+    e.put("b", &ok, b"x", "x").unwrap();
+    assert_eq!(e.get("b", &ok).unwrap().unwrap(), b"x");
+}
+
+#[test]
 fn compression_actually_shrinks_storage() {
     let (_d, e) = engine("zstd");
     let data = vec![b'a'; 500_000]; // very compressible

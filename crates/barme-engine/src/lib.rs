@@ -57,7 +57,19 @@ pub enum EngineError {
     /// still in the future.
     #[error("locked: {0}/{1} is locked until {2}")]
     Locked(String, String, String),
+    /// The key is empty, or the pot and key together are too long to store.
+    /// The stores encode `(pot, key)` into a single filename, whose length is
+    /// bounded by the filesystem's filename limit; see [`MAX_NAME_BYTES`].
+    #[error("invalid key: {0}")]
+    InvalidKey(String),
 }
+
+/// Filesystem filename-length limit, in bytes. The stores hex-encode `(pot,
+/// key)` into a single filename; the longest form is the annotation store's
+/// `{hexpot}_{hexkey}.json`. That has to fit here, which is what bounds how
+/// long a pot name plus key can be. Past it a write would fail deep in the
+/// store with an opaque I/O error, so we reject it up front instead.
+pub const MAX_NAME_BYTES: usize = 255;
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
@@ -147,6 +159,7 @@ impl Engine {
     /// Write an object and return its object_id. Prior versions of the same
     /// key stay resolvable; only the pointer moves.
     pub fn put(&self, bucket: &str, key: &str, data: &[u8], content_type: &str) -> Result<Hash> {
+        validate_key(bucket, key)?;
         self.ensure_unlocked(bucket, key)?;
         // Effective policy: the pot's overrides, falling back to the server
         // default. This is where per-pot config actually takes effect.
@@ -168,7 +181,7 @@ impl Engine {
         let mut chunks = Vec::new();
         let mut stored_size = 0u64;
         for c in barme_chunk::chunk(data) {
-            let encoded = codec.encode(&c.data)?;
+            let encoded = codec.encode(c.data)?;
             stored_size += encoded.len() as u64;
             chunks.push(self.store.chunks.put(&encoded)?);
         }
@@ -693,6 +706,25 @@ impl Engine {
         Ok(out)
     }
 
+}
+
+/// Reject keys the store can't hold before we do any work. An empty key has no
+/// filename; a `(pot, key)` pair whose encoded filename would overflow the
+/// filesystem's filename limit is refused with a clear message rather than a
+/// mid-write I/O error. The worst-case encoding is the annotation store's
+/// `{hexpot}_{hexkey}.json` — two hex chars per byte, a `_` separator, and the
+/// `.json` suffix.
+fn validate_key(bucket: &str, key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(EngineError::InvalidKey("key must not be empty".into()));
+    }
+    let encoded = 2 * bucket.len() + 2 * key.len() + "_.json".len();
+    if encoded > MAX_NAME_BYTES {
+        return Err(EngineError::InvalidKey(format!(
+            "pot+key encode to a {encoded}-byte filename; the limit is {MAX_NAME_BYTES}"
+        )));
+    }
+    Ok(())
 }
 
 fn build_codec(name: &str, level: i32) -> Result<Box<dyn Codec>> {

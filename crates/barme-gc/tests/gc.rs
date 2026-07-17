@@ -26,7 +26,7 @@ fn pseudo(len: usize, seed: u64) -> Vec<u8> {
 fn write_object(store: &Store, bucket: &str, key: &str, data: &[u8]) -> Hash {
     let mut chunk_hashes = Vec::new();
     for c in barme_chunk::chunk(data) {
-        chunk_hashes.push(store.chunks.put(&c.data).unwrap());
+        chunk_hashes.push(store.chunks.put(c.data).unwrap());
     }
     let manifest = Manifest {
         manifest_version: MANIFEST_VERSION,
