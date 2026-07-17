@@ -1,57 +1,46 @@
-# barme 0.4.1
+# barme 0.4.2
 
-Correctness under concurrency and garbage collection, found by an aggressive
-stress campaign against 0.4.0. Three real defects fixed, all with regression
-tests and adversarial harnesses.
+More hardening from the same stress campaign that produced 0.4.1. Three
+resilience and concurrency fixes, each with a regression test.
 
 ## Fixes
 
-- **Concurrent writes to one key no longer lose versions.** The pointer file is
-  read-modify-write, and it had no serialization: 24 threads writing the same key
-  landed **1** version in history, not 24 — 23 acknowledged writes silently
-  dropped. Writes to a key now take a per-key commit lock (sharded, so different
-  keys still run fully parallel and chunking stays off the lock). All 24 versions
-  are now kept. This directly backs the store's "every write keeps the previous
-  version" promise.
-- **GC can no longer erase an in-flight upload's chunks.** A streaming upload
-  writes all its chunks before committing its pointer, so those chunks are
-  unreferenced for the whole upload. GC's own module doc promised a guard against
-  reaping young chunks, but the guard wasn't implemented — with a tight grace
-  window a sweep could condemn and erase a live upload's chunks, then the client
-  got a success for an object missing its bytes. Uploads now **pin** each chunk
-  the instant it's stored and unpin once the pointer commits; GC treats pinned
-  chunks as reachable, so a sweep can't touch them no matter how aggressive the
-  grace window. A crash still drops the pins, so a crashed upload's orphans are
-  collected normally.
-- **Malformed pot names return 400, not 500.** A pot name containing a slash or
-  `..` (e.g. `/objects/..%2F..%2Fescape/k`) is rejected safely by the store, but
-  the door surfaced it as a 500. It's a client error and now answers 400 on both
-  the native and S3 doors. (The store already contained the input — nothing
-  escaped; this is about the right status code.)
-- **`barmed` reports the right version.** The daemon crate pinned its own
-  `0.3.0` instead of inheriting the workspace version, so the 0.4.0 binary
-  reported `0.3.0`. It now tracks the release version.
+- **A corrupt condemned-set file no longer wedges GC.** The `.condemned` file
+  (chunk -> when-condemned) was deserialized with the error propagated, so a
+  single bad byte in it would fail every future sweep — GC would stop forever and
+  the disk would fill without bound. It now heals to empty: the set is disposable
+  derived state (mark re-derives reachability every pass; the stamps only gate the
+  grace window), so the worst case is a one-grace-period delay in reclaiming
+  chunks. This matches how the rest of the collector re-derives its own truth.
+- **Concurrent delete and put on one key can't lose the delete.** `delete` now
+  takes the same per-key commit lock that writes do. Without it a delete could
+  interleave with a put's read-modify-write and be silently undone (the put reads
+  the history, the delete removes the file, the put rewrites it and resurrects the
+  key). Serializing makes it clean last-writer-wins.
+- **A corrupt pointer line no longer orphans the whole key.** The pointer file is
+  the one mutable, non-content-addressed piece of state, so it's the one place a
+  disk bit-flip isn't caught by an address check. A single unparseable line used
+  to fail the entire read, taking the key's intact versions and rollback down with
+  it. Corrupt lines are now skipped, so the surviving versions stay readable. (A
+  corrupt *current* line resolves to the previous version rather than erroring —
+  availability over a hard failure, consistent with the rest of the store.)
 
-## Hardening (tests + harnesses)
+## Under the campaign, holding up
 
-- `scripts/crash-test.sh` gained a hot-GC mode (`GC_GRACE=`): `kill -9` mid-write
-  *while GC actively sweeps and erases*. Verified: 8 crash cycles under a 2s grace
-  with 1s sweeps, 62 objects, zero lost.
-- `scripts/abuse-test.sh`: a battery of hostile HTTP inputs (overlong keys, path
-  traversal in keys and pot names, control chars, empty/at-cap/over-cap bodies,
-  bad auth, malformed JSON, huge headers) plus uploads under `grace=0` GC. The
-  server survives every input and kept all ~290 objects intact.
-- New unit/integration tests: in-flight pin survival under aggressive GC, orphan
-  collection still works, and concurrent same-key / distinct-key write invariants.
+- A version-explosion probe (5000 writes to one key) showed **flat ~per-write
+  cost, no O(n²) cliff** — the pointer rewrite is dominated by the per-write fsync,
+  not by history length. See known limits for the one caveat at extreme counts.
+- New adversarial tests: racing put/delete on one key never corrupts state;
+  corrupt condemned set and corrupt pointer line both recover.
 
 ## Upgrading
 
-Drop-in. On-disk format unchanged; a 0.4.0 (or 0.3.x) data dir opens as-is.
+Drop-in. On-disk format unchanged; a 0.4.x (or 0.3.x) data dir opens as-is.
 
 ## Docker
 
 ```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.1
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.2
 ```
 
 ## Known limits
@@ -59,6 +48,10 @@ docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data el
 - Alpha. Formats and on-disk layout may still change before v1.
 - Secret keys are still stored in the clear and the default `barme/barme` login
   still works out of the box — both land in the next release. Don't expose it yet.
+- A single key's version history has no cap by default (set `max_versions` per pot
+  to bound it). The pointer file grows linearly with versions and is rewritten per
+  write, so a key written millions of times becomes a large, slow file. A default
+  cap is planned.
 - A pot name plus key must encode to under 255 bytes (about 120 key bytes for a
   short pot).
 - `barmed` binds IPv4 (`0.0.0.0`); on a dual-stack host reach it via `127.0.0.1`

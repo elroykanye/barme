@@ -157,9 +157,17 @@ impl ChunkStore {
 
     /// The condemned set: chunk -> unix-seconds it was first condemned. GC reads
     /// it whole, mutates in memory, and writes it back with `save_condemned`.
+    ///
+    /// A corrupt file heals to empty instead of erroring. The set is disposable
+    /// derived state — mark-and-sweep re-derives reachability every pass, and the
+    /// stamps only gate the grace window — so losing it just re-condemns chunks
+    /// with fresh timestamps, delaying their collection by at most one grace
+    /// period. Propagating the parse error instead would wedge GC forever on a
+    /// single bad byte and let the disk fill without bound; self-healing is both
+    /// safe and in keeping with the collector re-deriving its own truth.
     pub fn load_condemned(&self) -> Result<HashMap<Hash, u64>> {
         match std::fs::read(self.root.join(CONDEMNED)) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).unwrap_or_default()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
             Err(e) => Err(e.into()),
         }

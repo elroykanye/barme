@@ -39,16 +39,25 @@ impl PointerStore {
     }
 
     /// Every version this key has pointed at, oldest first.
+    ///
+    /// The pointer file is the one piece of mutable, non-content-addressed state,
+    /// so it's the one place a disk bit-flip isn't caught by an address check. A
+    /// corrupt line is skipped rather than failing the whole read: the other
+    /// versions are each an independent, still-valid hash, so a single bad line
+    /// must not orphan the entire key (including its intact history and the
+    /// ability to roll back). The cost is that a corrupt *current* line silently
+    /// resolves to the previous version instead of erroring — availability over a
+    /// hard failure, which matches how the rest of the store degrades.
     pub fn history(&self, bucket: &str, key: &str) -> Result<Vec<Hash>> {
         let path = self.path(bucket, key)?;
         let Some(contents) = read_to_string_opt(&path)? else {
             return Ok(vec![]);
         };
-        contents
+        Ok(contents
             .lines()
             .filter(|l| !l.is_empty())
-            .map(|l| l.parse::<Hash>().map_err(Into::into))
-            .collect()
+            .filter_map(|l| l.parse::<Hash>().ok())
+            .collect())
     }
 
     /// Every bucket that has ever held a key. GC's mark starts here, fanning
@@ -261,6 +270,27 @@ mod tests {
         s.set("b", "k", &Hash::of(b"x")).unwrap();
         s.remove("b", "k").unwrap();
         assert_eq!(s.current("b", "k").unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_line_does_not_orphan_the_key() {
+        let (_d, s) = store();
+        let (v1, v2, v3) = (Hash::of(b"v1"), Hash::of(b"v2"), Hash::of(b"v3"));
+        s.set("b", "k", &v1).unwrap();
+        s.set("b", "k", &v2).unwrap();
+        s.set("b", "k", &v3).unwrap();
+
+        // Corrupt the middle line on disk, as bit rot would.
+        let path = s.path("b", "k").unwrap();
+        let good = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<&str> = good.lines().collect();
+        lines[1] = "blake3:this-is-not-a-valid-hash";
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        // The intact versions survive; the key is not lost, and current still
+        // resolves (here to the still-valid newest line).
+        assert_eq!(s.history("b", "k").unwrap(), vec![v1, v3]);
+        assert_eq!(s.current("b", "k").unwrap(), Some(v3));
     }
 
     #[test]

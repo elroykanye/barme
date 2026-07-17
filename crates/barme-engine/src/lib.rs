@@ -475,6 +475,11 @@ impl Engine {
 
     pub fn delete(&self, bucket: &str, key: &str) -> Result<()> {
         self.ensure_unlocked(bucket, key)?;
+        // Same commit lock as writes: without it a delete can interleave with a
+        // concurrent put's read-modify-write and be lost — the put reads the
+        // history, the delete removes the file, then the put rewrites it and
+        // resurrects the "deleted" key. Serializing makes last-writer-wins clean.
+        let _commit = self.key_lock(bucket, key);
         Ok(self.store.pointers.remove(bucket, key)?)
     }
 

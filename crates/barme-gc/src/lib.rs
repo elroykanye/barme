@@ -142,6 +142,27 @@ mod tests {
         assert!(!store.chunks.has(&h), "unpinned orphan should be collectible");
     }
 
+    /// A corrupt condemned-set file must not wedge GC forever. The set is
+    /// disposable derived state; a bad byte in it heals to empty, and collection
+    /// continues, rather than every sweep erroring and the disk filling without
+    /// bound.
+    #[test]
+    fn corrupt_condemned_set_does_not_wedge_gc() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let gc = Gc::new(&store, Duration::from_secs(0));
+
+        let h = store.chunks.put(b"garbage to reclaim").unwrap();
+        // Scribble non-JSON over the condemned file, as bit rot or a botched
+        // write would.
+        std::fs::write(dir.path().join("chunks").join(".condemned"), b"\xff not json {{{").unwrap();
+
+        // GC must still make progress and reclaim the orphan, not error out.
+        gc.sweep(1).unwrap(); // re-condemns (fresh stamp), heals the file
+        gc.sweep(2).unwrap(); // erases (grace 0)
+        assert!(!store.chunks.has(&h), "corrupt condemned set wedged collection");
+    }
+
     /// The pin set must not wedge normal collection: an unpinned, unreferenced
     /// chunk (e.g. left by a crashed upload, whose pins died with the process) is
     /// still reclaimed on schedule.

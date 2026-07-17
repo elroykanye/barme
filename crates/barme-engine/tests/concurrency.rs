@@ -51,6 +51,46 @@ fn concurrent_writes_to_one_key_keep_every_version() {
     assert!(engine.read_object(&current).is_ok());
 }
 
+/// Racing puts and deletes on one key must never leave torn or corrupt state:
+/// whatever the interleaving, the key ends either absent or resolvable to a
+/// real object, and no operation panics.
+#[test]
+fn racing_put_and_delete_never_corrupt() {
+    let (_d, engine) = engine();
+    const ROUNDS: usize = 40;
+
+    let handles: Vec<_> = (0..ROUNDS)
+        .flat_map(|i| {
+            let put = {
+                let e = engine.clone();
+                thread::spawn(move || {
+                    let _ = e.put("pot", "contested", &vec![i as u8; 4096], "text/plain");
+                })
+            };
+            let del = {
+                let e = engine.clone();
+                thread::spawn(move || {
+                    let _ = e.delete("pot", "contested");
+                })
+            };
+            [put, del]
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // Final state must be coherent: history parses cleanly, and if a current
+    // version exists it resolves to a readable object.
+    let hist = engine.history("pot", "contested").unwrap();
+    if let Some(current) = hist.last() {
+        assert!(
+            engine.read_object(current).is_ok(),
+            "current version did not resolve after put/delete races"
+        );
+    }
+}
+
 /// Racing writers to *different* keys in the same pot must never corrupt each
 /// other, and every key must end resolvable.
 #[test]
