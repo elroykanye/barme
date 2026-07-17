@@ -89,6 +89,64 @@ fn rejects_empty_and_overlong_keys() {
 }
 
 #[test]
+fn streamed_write_equals_buffered_write() {
+    use std::io::Cursor;
+    // Same bytes through both paths must chunk identically: same chunk set,
+    // same digest, same size. (The object_id itself differs — it commits to
+    // created_at — but the stored chunks and manifest content match.) Odd size
+    // to catch any tail-handling difference between FastCDC and StreamCDC.
+    for codec in ["none", "zstd"] {
+        let (_d, e) = engine(codec);
+        let data = pseudo(3 * 1024 * 1024 + 777, 9);
+        e.put("b", "buffered", &data, "application/octet-stream").unwrap();
+        e.put_stream(
+            "b",
+            "streamed",
+            Cursor::new(data.clone()),
+            "application/octet-stream",
+            u64::MAX,
+        )
+        .unwrap();
+        let mb = e.manifest("b", "buffered").unwrap().unwrap();
+        let ms = e.manifest("b", "streamed").unwrap().unwrap();
+        assert_eq!(mb.chunking.chunks, ms.chunking.chunks, "codec {codec}: chunk sets differ");
+        assert_eq!(mb.chunking.merkle_root, ms.chunking.merkle_root, "codec {codec}: roots differ");
+        assert_eq!(mb.original.sha256, ms.original.sha256, "codec {codec}: digests differ");
+        assert_eq!(mb.original.size_bytes, ms.original.size_bytes, "codec {codec}: sizes differ");
+        assert_eq!(e.get("b", "streamed").unwrap().unwrap(), data, "codec {codec}");
+    }
+}
+
+#[test]
+fn streamed_write_dedups_against_buffered() {
+    use std::io::Cursor;
+    let (_d, e) = engine("none");
+    let data = pseudo(2 * 1024 * 1024, 11);
+    e.put("b", "a", &data, "x").unwrap();
+    let before = e.stats().unwrap().unique_chunks;
+    e.put_stream("b", "b2", Cursor::new(data), "x", u64::MAX).unwrap();
+    let after = e.stats().unwrap().unique_chunks;
+    assert_eq!(before, after, "identical content streamed in should add no new chunks");
+}
+
+#[test]
+fn streamed_write_enforces_size_cap() {
+    use barme_engine::EngineError;
+    use std::io::Cursor;
+    let (_d, e) = engine("none");
+    let data = pseudo(1_000_000, 13);
+    let err = e
+        .put_stream("b", "big", Cursor::new(data), "x", 100_000)
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::TooLarge { limit: 100_000 }),
+        "got {err:?}"
+    );
+    // Nothing was committed: no pointer, so no object.
+    assert!(e.get("b", "big").unwrap().is_none());
+}
+
+#[test]
 fn compression_actually_shrinks_storage() {
     let (_d, e) = engine("zstd");
     let data = vec![b'a'; 500_000]; // very compressible

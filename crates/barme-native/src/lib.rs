@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -21,9 +21,11 @@ use barme_auth::{authorize, Action, Credentials};
 use barme_core::{Annotation, BucketConfig, Hash, KeyRecord, Webhook};
 use barme_engine::{Engine, EngineError};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
 use std::time::Instant;
+use tokio_util::io::{StreamReader, SyncIoBridge};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
@@ -45,6 +47,8 @@ enum NativeError {
     Engine(EngineError),
     Semantic(barme_semantic::SemanticError),
     Forbidden,
+    /// The upload's blocking task failed to run (panic or cancellation).
+    Internal(String),
 }
 
 impl From<EngineError> for NativeError {
@@ -67,6 +71,12 @@ impl IntoResponse for NativeError {
             NativeError::Engine(e @ EngineError::InvalidKey(..)) => {
                 (StatusCode::BAD_REQUEST, e.to_string()).into_response()
             }
+            NativeError::Engine(e @ EngineError::TooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string()).into_response()
+            }
+            NativeError::Engine(e @ EngineError::Upload(..)) => {
+                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+            }
             NativeError::Engine(e) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
@@ -75,6 +85,9 @@ impl IntoResponse for NativeError {
             }
             NativeError::Forbidden => {
                 (StatusCode::FORBIDDEN, "access denied").into_response()
+            }
+            NativeError::Internal(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
             }
         }
     }
@@ -417,18 +430,42 @@ async fn upload(
     State(st): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, NativeError> {
     caller(&st, &headers).require_write(&bucket)?;
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_CONTENT_TYPE);
-    let object_id = st.engine.put(&bucket, &key, &body, content_type)?;
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
+        .to_string();
+    let object_id = stream_upload(&st, bucket, key, content_type, body).await?;
     Ok(Json(Uploaded {
         object_id: object_id.to_string(),
     })
     .into_response())
+}
+
+/// Bridge an async request body into the engine's blocking streaming writer.
+/// The body is pulled chunk by chunk on a blocking task, so even a multi-GB
+/// upload never fully materializes in memory. The `max_upload_bytes` cap is
+/// enforced inside the writer, which returns `TooLarge` -> 413 when exceeded.
+async fn stream_upload(
+    st: &AppState,
+    bucket: String,
+    key: String,
+    content_type: String,
+    body: Body,
+) -> Result<Hash, NativeError> {
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let sync_reader = SyncIoBridge::new(StreamReader::new(stream));
+    let engine = st.engine.clone();
+    let max = st.max_upload_bytes as u64;
+    tokio::task::spawn_blocking(move || {
+        engine.put_stream(&bucket, &key, sync_reader, &content_type, max)
+    })
+    .await
+    .map_err(|e| NativeError::Internal(e.to_string()))?
+    .map_err(NativeError::from)
 }
 
 async fn download(
@@ -437,15 +474,31 @@ async fn download(
     headers: HeaderMap,
 ) -> Result<Response, NativeError> {
     caller(&st, &headers).require_read(&st, &bucket)?;
-    let Some(bytes) = st.engine.get(&bucket, &key)? else {
+    let Some((content_type, size, codec, chunks)) = st.engine.object_head(&bucket, &key)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let content_type = st
-        .engine
-        .manifest(&bucket, &key)?
-        .map(|m| m.original.content_type)
-        .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
-    Ok(with_bytes(&content_type, bytes))
+
+    // Stream the object out one chunk at a time on blocking tasks, so reading a
+    // large object never buffers the whole thing in memory. Each chunk self-
+    // verifies on read, so integrity holds without a whole-object pass.
+    let engine = st.engine.clone();
+    let stream = futures_util::stream::iter(chunks).then(move |h| {
+        let engine = engine.clone();
+        let codec = codec.clone();
+        async move {
+            tokio::task::spawn_blocking(move || engine.read_chunk(&h, &codec))
+                .await
+                .map_err(std::io::Error::other)?
+                .map(Bytes::from)
+                .map_err(std::io::Error::other)
+        }
+    });
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::from_stream(stream))
+        .map_err(|e| NativeError::Internal(e.to_string()))
 }
 
 async fn remove(
@@ -500,8 +553,26 @@ async fn content(
     let Some(m) = st.engine.object_manifest(&object_id)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let bytes = st.engine.read_object(&object_id)?;
-    Ok(with_bytes(&m.original.content_type, bytes))
+    // Stream by-hash delivery the same way as a normal download: one chunk at a
+    // time, so fetching a large object by hash never buffers it whole.
+    let engine = st.engine.clone();
+    let codec = m.storage.codec.clone();
+    let stream = futures_util::stream::iter(m.chunking.chunks).then(move |h| {
+        let engine = engine.clone();
+        let codec = codec.clone();
+        async move {
+            tokio::task::spawn_blocking(move || engine.read_chunk(&h, &codec))
+                .await
+                .map_err(std::io::Error::other)?
+                .map(Bytes::from)
+                .map_err(std::io::Error::other)
+        }
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, m.original.content_type)
+        .header(header::CONTENT_LENGTH, m.original.size_bytes)
+        .body(Body::from_stream(stream))
+        .map_err(|e| NativeError::Internal(e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -1177,7 +1248,10 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
-    #[tokio::test]
+    // Multi-thread runtime: the streaming upload bridges the async body into a
+    // blocking chunker via SyncIoBridge, which needs another runtime thread to
+    // drive the body while the blocking task reads it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn oversized_upload_is_rejected_with_413() {
         let mut st = state(); // open mode
         st.max_upload_bytes = 16; // tiny cap for the test
@@ -1191,6 +1265,43 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_upload_and_download_round_trip() {
+        let st = state(); // open mode
+        // A few MB of varied bytes: many chunks, both write and read exercise
+        // the streaming paths (upload via SyncIoBridge, download via the
+        // chunk-at-a-time body stream).
+        let body: Vec<u8> = (0..3_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        let put = send(
+            app(st.clone()),
+            Request::builder()
+                .method("PUT")
+                .uri("/objects/b/big.bin")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(put.status(), StatusCode::OK);
+
+        let get = send(
+            app(st),
+            Request::builder()
+                .uri("/objects/b/big.bin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(get.status(), StatusCode::OK);
+        assert_eq!(
+            get.headers().get(header::CONTENT_LENGTH).unwrap(),
+            &body.len().to_string(),
+            "streamed download must report the true content length"
+        );
+        let got = get.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(got.len(), body.len(), "streamed download length");
+        assert_eq!(&got[..], &body[..], "streamed body must read back intact");
     }
 
     #[tokio::test]

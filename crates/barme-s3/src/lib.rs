@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Bytes,
+    body::Body,
     extract::{Path, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
@@ -24,27 +24,42 @@ use axum::{
 };
 use barme_auth::{authorize, verify_sigv4, Action, Credentials, Principal, SignedRequest};
 use barme_engine::{Engine, EngineError};
+use futures_util::{StreamExt, TryStreamExt};
+use tokio_util::io::{StreamReader, SyncIoBridge};
 
 /// S3 clients expect a Content-Type on every write; use this when they omit one.
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 
 /// Anything the engine hands back becomes a status + message. Not-found is
 /// modelled as an `Option` on the read paths, so it never reaches here.
-struct S3Error(EngineError);
+enum S3Error {
+    Engine(EngineError),
+    /// The upload's blocking task failed to run (panic or cancellation).
+    Internal(String),
+}
 
 impl From<EngineError> for S3Error {
     fn from(e: EngineError) -> Self {
-        S3Error(e)
+        S3Error::Engine(e)
     }
 }
 
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
-        let status = match self.0 {
-            EngineError::InvalidKey(..) => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, msg) = match self {
+            S3Error::Engine(e @ EngineError::InvalidKey(..)) => {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+            S3Error::Engine(e @ EngineError::TooLarge { .. }) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
+            }
+            S3Error::Engine(e @ EngineError::Upload(..)) => {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            }
+            S3Error::Engine(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            S3Error::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
-        (status, self.0.to_string()).into_response()
+        (status, msg).into_response()
     }
 }
 
@@ -129,17 +144,30 @@ async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Re
 }
 
 async fn put_object(
-    State(S3State { engine, .. }): State<S3State>,
+    State(st): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, S3Error> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_CONTENT_TYPE);
+        .unwrap_or(DEFAULT_CONTENT_TYPE)
+        .to_string();
 
-    let object_id = engine.put(&bucket, &key, &body, content_type)?;
+    // Stream the body straight into the engine on a blocking task, so a large
+    // object never fully buffers in memory. barme-auth verifies SigV4 from the
+    // headers only (no payload-hash check), so the body doesn't need buffering
+    // for the signature.
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let sync_reader = SyncIoBridge::new(StreamReader::new(stream));
+    let engine = st.engine.clone();
+    let max = st.max_upload_bytes as u64;
+    let object_id = tokio::task::spawn_blocking(move || {
+        engine.put_stream(&bucket, &key, sync_reader, &content_type, max)
+    })
+    .await
+    .map_err(|e| S3Error::Internal(e.to_string()))??;
 
     let mut out = HeaderMap::new();
     out.insert(header::ETAG, etag(&object_id.to_string()));
@@ -147,26 +175,35 @@ async fn put_object(
 }
 
 async fn get_object(
-    State(S3State { engine, .. }): State<S3State>,
+    State(st): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<Response, S3Error> {
-    let Some(bytes) = engine.get(&bucket, &key)? else {
+    let Some((content_type, size, codec, chunks)) = st.engine.object_head(&bucket, &key)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    // The manifest carries the recorded content-type; fall back if it vanished
-    // between the two calls.
-    let content_type = engine
-        .manifest(&bucket, &key)?
-        .map(|m| m.original.content_type)
-        .unwrap_or_else(|| DEFAULT_CONTENT_TYPE.to_string());
 
-    let mut out = HeaderMap::new();
-    out.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(&content_type).unwrap_or(HeaderValue::from_static(DEFAULT_CONTENT_TYPE)),
-    );
-    out.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
-    Ok((StatusCode::OK, out, bytes).into_response())
+    // Stream chunks out one at a time so a large GET never buffers the whole
+    // object; each chunk self-verifies on read.
+    let engine = st.engine.clone();
+    let body_stream = futures_util::stream::iter(chunks).then(move |h| {
+        let engine = engine.clone();
+        let codec = codec.clone();
+        async move {
+            tokio::task::spawn_blocking(move || engine.read_chunk(&h, &codec))
+                .await
+                .map_err(std::io::Error::other)?
+                .map(axum::body::Bytes::from)
+                .map_err(std::io::Error::other)
+        }
+    });
+
+    let ct = HeaderValue::from_str(&content_type)
+        .unwrap_or(HeaderValue::from_static(DEFAULT_CONTENT_TYPE));
+    Response::builder()
+        .header(header::CONTENT_TYPE, ct)
+        .header(header::CONTENT_LENGTH, size)
+        .body(Body::from_stream(body_stream))
+        .map_err(|e| S3Error::Internal(e.to_string()))
 }
 
 async fn head_object(

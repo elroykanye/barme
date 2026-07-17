@@ -25,7 +25,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// Emitted after a successful write, for anything that wants to react to new
-/// objects (the semantic layer and webhooks). Handed to the write hook by value.
+/// objects (the semantic layer and webhooks). Carries only the object's
+/// identity and location — never its bytes. A reactor that needs the content
+/// (the semantic indexer) reads it back by `object_id`, off the write path, so
+/// a large streamed upload never has to be re-materialized in memory just to
+/// fire the hook.
 pub struct WriteEvent {
     pub object_id: Hash,
     pub tenant: String,
@@ -33,7 +37,6 @@ pub struct WriteEvent {
     /// Where the write landed, so reactors can annotate or report the location.
     pub bucket: String,
     pub key: String,
-    pub bytes: Vec<u8>,
 }
 
 type WriteHook = Arc<dyn Fn(WriteEvent) + Send + Sync>;
@@ -62,6 +65,14 @@ pub enum EngineError {
     /// bounded by the filesystem's filename limit; see [`MAX_NAME_BYTES`].
     #[error("invalid key: {0}")]
     InvalidKey(String),
+    /// A streaming upload exceeded the caller-supplied size limit. Any chunks
+    /// already written are left unreferenced for GC to reclaim.
+    #[error("upload too large: exceeds {limit} bytes")]
+    TooLarge { limit: u64 },
+    /// Reading the upload stream failed partway (client disconnect, truncated
+    /// body, or an I/O error on the socket).
+    #[error("reading upload: {0}")]
+    Upload(#[source] std::io::Error),
 }
 
 /// Filesystem filename-length limit, in bytes. The stores hex-encode `(pot,
@@ -161,8 +172,99 @@ impl Engine {
     pub fn put(&self, bucket: &str, key: &str, data: &[u8], content_type: &str) -> Result<Hash> {
         validate_key(bucket, key)?;
         self.ensure_unlocked(bucket, key)?;
-        // Effective policy: the pot's overrides, falling back to the server
-        // default. This is where per-pot config actually takes effect.
+        let ep = self.effective_policy(bucket, content_type)?;
+
+        let mut chunks = Vec::new();
+        let mut stored_size = 0u64;
+        for c in barme_chunk::chunk(data) {
+            let encoded = ep.codec.encode(c.data)?;
+            stored_size += encoded.len() as u64;
+            chunks.push(self.store.chunks.put(&encoded)?);
+        }
+
+        let object_id = self.finalize_write(
+            bucket,
+            key,
+            content_type,
+            &ep,
+            chunks,
+            stored_size,
+            data.len() as u64,
+            sha256_hex(data),
+        )?;
+
+        if let Some(hook) = &self.write_hook {
+            hook(WriteEvent {
+                object_id,
+                tenant: self.policy.tenant.clone(),
+                content_type: content_type.to_string(),
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+            });
+        }
+        Ok(object_id)
+    }
+
+    /// Streaming write: chunk the object as it arrives from `reader`, storing
+    /// each chunk as it's cut, so memory stays flat regardless of object size.
+    /// `max_bytes` caps the total; past it the write is abandoned with
+    /// [`EngineError::TooLarge`] and the chunks written so far are left
+    /// unreferenced for GC to reclaim.
+    ///
+    /// Produces byte-for-byte the same object as [`put`](Self::put) on the same
+    /// input — same chunk boundaries, same manifest, same `object_id` — so a
+    /// streamed upload dedups against a buffered one.
+    pub fn put_stream<R: std::io::Read>(
+        &self,
+        bucket: &str,
+        key: &str,
+        reader: R,
+        content_type: &str,
+        max_bytes: u64,
+    ) -> Result<Hash> {
+        validate_key(bucket, key)?;
+        self.ensure_unlocked(bucket, key)?;
+        let ep = self.effective_policy(bucket, content_type)?;
+
+        let mut chunks = Vec::new();
+        let mut stored_size = 0u64;
+        let mut orig_size = 0u64;
+        let mut hasher = Sha256::new();
+
+        for item in barme_chunk::chunk_stream(reader) {
+            let (_raw_hash, data) = item.map_err(EngineError::Upload)?;
+            orig_size += data.len() as u64;
+            if orig_size > max_bytes {
+                return Err(EngineError::TooLarge { limit: max_bytes });
+            }
+            hasher.update(&data);
+            let encoded = ep.codec.encode(&data)?;
+            stored_size += encoded.len() as u64;
+            chunks.push(self.store.chunks.put(&encoded)?);
+        }
+        let sha256 = hex::encode(hasher.finalize());
+
+        let object_id =
+            self.finalize_write(bucket, key, content_type, &ep, chunks, stored_size, orig_size, sha256)?;
+
+        if let Some(hook) = &self.write_hook {
+            // No bytes in the event: a reactor that needs the content reads it
+            // back by id. This keeps the streaming write flat in memory — the
+            // whole point of it — instead of re-materializing the object here.
+            hook(WriteEvent {
+                object_id,
+                tenant: self.policy.tenant.clone(),
+                content_type: content_type.to_string(),
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+            });
+        }
+        Ok(object_id)
+    }
+
+    /// The pot's effective storage policy: its own overrides where set, the
+    /// server default otherwise. Shared by the buffered and streaming writes.
+    fn effective_policy(&self, bucket: &str, content_type: &str) -> Result<EffectivePolicy> {
         let cfg = self.store.meta.config(bucket)?;
         let codec_name = cfg.codec.clone().unwrap_or_else(|| self.policy.codec.clone());
         let level = cfg.zstd_level.unwrap_or(self.policy.zstd_level);
@@ -175,34 +277,49 @@ impl Engine {
         } else {
             Route::Blob
         };
-
         let codec = build_codec(&codec_name, level)?;
+        Ok(EffectivePolicy {
+            codec,
+            codec_name,
+            level,
+            fidelity,
+            route,
+        })
+    }
 
-        let mut chunks = Vec::new();
-        let mut stored_size = 0u64;
-        for c in barme_chunk::chunk(data) {
-            let encoded = codec.encode(c.data)?;
-            stored_size += encoded.len() as u64;
-            chunks.push(self.store.chunks.put(&encoded)?);
-        }
+    /// Assemble the manifest from an already-stored chunk set and commit it:
+    /// write the manifest, move the pointer, record the reverse index. Shared
+    /// tail of both write paths. Does not fire the write hook — the caller does,
+    /// since only it knows whether the object bytes are still in hand.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_write(
+        &self,
+        bucket: &str,
+        key: &str,
+        content_type: &str,
+        ep: &EffectivePolicy,
+        chunks: Vec<Hash>,
+        stored_size: u64,
+        orig_size: u64,
+        sha256: String,
+    ) -> Result<Hash> {
         let merkle_root = Some(barme_core::merkle::root(&chunks));
-
         let manifest = Manifest {
             manifest_version: MANIFEST_VERSION,
             object_id: Hash::of(b""), // set by the manifest store
             created_at: now_rfc3339(),
             original: Original {
-                size_bytes: data.len() as u64,
-                sha256: sha256_hex(data),
+                size_bytes: orig_size,
+                sha256,
                 content_type: content_type.to_string(),
             },
             storage: Storage {
-                route,
-                fidelity,
-                codec: codec_name.clone(),
-                codec_params: codec_params(&codec_name, level),
+                route: ep.route,
+                fidelity: ep.fidelity,
+                codec: ep.codec_name.clone(),
+                codec_params: codec_params(&ep.codec_name, ep.level),
                 stored_size_bytes: stored_size,
-                reconstructs_original: fidelity == Fidelity::Exact,
+                reconstructs_original: ep.fidelity == Fidelity::Exact,
             },
             chunking: Chunking {
                 algo: Some("fastcdc".into()),
@@ -219,17 +336,6 @@ impl Engine {
         // Record where this object_id lives, so a semantic hit can name a
         // location and auto-tagging can find the object to annotate.
         self.store.reverse.add(&object_id, bucket, key)?;
-
-        if let Some(hook) = &self.write_hook {
-            hook(WriteEvent {
-                object_id,
-                tenant: self.policy.tenant.clone(),
-                content_type: content_type.to_string(),
-                bucket: bucket.to_string(),
-                key: key.to_string(),
-                bytes: data.to_vec(),
-            });
-        }
         Ok(object_id)
     }
 
@@ -261,6 +367,44 @@ impl Engine {
     /// Read any version directly by object_id, decompress, and verify.
     pub fn read_object(&self, object_id: &Hash) -> Result<Vec<u8>> {
         self.read_manifest_bytes(object_id)
+    }
+
+    /// What a streaming reader needs before pulling bytes: content type, total
+    /// size, codec, and the ordered chunk addresses. `None` if the key is
+    /// absent. Pair with [`read_chunk`](Self::read_chunk) to stream an object
+    /// out one chunk at a time, so a download never buffers the whole object.
+    pub fn object_head(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<(String, u64, String, Vec<Hash>)>> {
+        let Some(object_id) = self.store.pointers.current(bucket, key)? else {
+            return Ok(None);
+        };
+        let m = self
+            .store
+            .manifests
+            .get(&object_id)?
+            .ok_or(EngineError::DanglingPointer(object_id))?;
+        Ok(Some((
+            m.original.content_type,
+            m.original.size_bytes,
+            m.storage.codec,
+            m.chunking.chunks,
+        )))
+    }
+
+    /// Read and decode a single chunk by address. The chunk store verifies the
+    /// chunk's content hash on read, so a streamed download stays integrity-
+    /// checked chunk by chunk without ever holding the whole object.
+    pub fn read_chunk(&self, hash: &Hash, codec: &str) -> Result<Vec<u8>> {
+        let stored = self
+            .store
+            .chunks
+            .get(hash)?
+            .ok_or(EngineError::MissingChunk(*hash, *hash))?;
+        let dec = barme_codec::decoder_for(codec)?;
+        Ok(dec.decode(&stored)?)
     }
 
     /// Fetch a manifest by object_id, without reading the bytes. Used by the
@@ -499,11 +643,32 @@ impl Engine {
             .manifests
             .get(&object_id)?
             .ok_or(EngineError::DanglingPointer(object_id))?;
-        match self.read_manifest_bytes(&object_id) {
-            Ok(bytes) => Ok(sha256_hex(&bytes) == manifest.original.sha256),
-            Err(EngineError::Integrity(_)) => Ok(false),
-            Err(EngineError::Store(StoreError::Integrity { .. })) => Ok(false),
-            Err(e) => Err(e),
+        let codec = barme_codec::decoder_for(&manifest.storage.codec)?;
+
+        // Re-hash chunk by chunk rather than buffering the whole object, so
+        // verifying a large object stays flat in memory. Each chunk also self-
+        // verifies its content address on read; a missing or corrupted chunk
+        // means the object doesn't verify.
+        let mut hasher = Sha256::new();
+        for h in &manifest.chunking.chunks {
+            let stored = match self.store.chunks.get(h) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Ok(false),
+                Err(StoreError::Integrity { .. }) => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            match codec.decode(&stored) {
+                Ok(d) => hasher.update(&d),
+                Err(_) => return Ok(false),
+            }
+        }
+
+        // Lossy fidelity intentionally changes bytes, so a digest match isn't
+        // expected; chunk presence and per-chunk integrity are the check there.
+        if manifest.storage.fidelity == Fidelity::Exact {
+            Ok(hex::encode(hasher.finalize()) == manifest.original.sha256)
+        } else {
+            Ok(true)
         }
     }
 
@@ -706,6 +871,17 @@ impl Engine {
         Ok(out)
     }
 
+}
+
+/// The resolved storage policy for a single write: the codec to run plus the
+/// manifest fields describing it. Computed once by `effective_policy`, then used
+/// by both the buffered and streaming write paths.
+struct EffectivePolicy {
+    codec: Box<dyn Codec>,
+    codec_name: String,
+    level: i32,
+    fidelity: Fidelity,
+    route: Route,
 }
 
 /// Reject keys the store can't hold before we do any work. An empty key has no

@@ -39,10 +39,19 @@ async fn dispatch_event(engine: &Arc<Engine>, semantic: &Option<Arc<Semantic>>, 
     }
 
     // Semantic understanding + auto-tagging. The embedder may proxy back tags
-    // and text; we store them as annotations on the object, best-effort.
+    // and text; we store them as annotations on the object, best-effort. The
+    // event carries no bytes (so streaming writes stay flat in memory); read
+    // the object back here, off the write path, only when indexing is on.
     if let Some(semantic) = semantic {
+        let bytes = match engine.read_object(&ev.object_id) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("read-back for understand failed for {}: {e}", ev.object_id);
+                return;
+            }
+        };
         match semantic
-            .understand(&ev.tenant, ev.object_id, &ev.content_type, &ev.bytes)
+            .understand(&ev.tenant, ev.object_id, &ev.content_type, &bytes)
             .await
         {
             Ok(u) if !u.tags.is_empty() || u.text.is_some() => {

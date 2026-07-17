@@ -6,7 +6,8 @@
 //! would reshuffle every chunk after an edit and save nothing.
 
 use barme_core::Hash;
-use fastcdc::v2020::FastCDC;
+use fastcdc::v2020::{FastCDC, StreamCDC};
+use std::io::Read;
 
 /// Chunk size bounds, in bytes. FastCDC aims for `AVG` and stays within
 /// `[MIN, MAX]`. Smaller means finer dedup but more chunks to track; these are
@@ -38,6 +39,22 @@ pub fn chunk(data: &[u8]) -> impl Iterator<Item = Chunk<'_>> {
             hash: Hash::of(slice),
             data: slice,
         }
+    })
+}
+
+/// The streaming counterpart to [`chunk`]: split bytes read from `source` into
+/// content-defined chunks without ever holding the whole input in memory. The
+/// chunker buffers only a bounded window (a few times [`MAX_CHUNK`]), so memory
+/// stays flat no matter how large the object is.
+///
+/// Each item owns its chunk's bytes (there's no backing buffer to borrow from).
+/// For the same input, the boundaries — and therefore the chunk hashes — match
+/// [`chunk`] exactly, so an object streamed in dedups against the same object
+/// written buffered.
+pub fn chunk_stream<R: Read>(source: R) -> impl Iterator<Item = std::io::Result<(Hash, Vec<u8>)>> {
+    StreamCDC::new(source, MIN_CHUNK, AVG_CHUNK, MAX_CHUNK).map(|res| match res {
+        Ok(cd) => Ok((Hash::of(&cd.data), cd.data)),
+        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
     })
 }
 
@@ -74,6 +91,26 @@ mod tests {
     fn is_deterministic() {
         let data = pseudo(512 * 1024, 2);
         assert_eq!(hashes(&data), hashes(&data));
+    }
+
+    #[test]
+    fn stream_matches_buffered() {
+        // The whole point of streaming: identical boundaries and hashes to the
+        // in-memory path, so dedup lines up regardless of how an object arrived.
+        for len in [0usize, 1, 1000, 512 * 1024, 3 * 1024 * 1024] {
+            let data = pseudo(len, 7);
+            let buffered: Vec<Hash> = chunk(&data).map(|c| c.hash).collect();
+            let streamed: Vec<Hash> = chunk_stream(&data[..])
+                .map(|r| r.unwrap().0)
+                .collect();
+            assert_eq!(buffered, streamed, "mismatch at len {len}");
+
+            // And the streamed chunks reassemble to the original bytes.
+            let rebuilt: Vec<u8> = chunk_stream(&data[..])
+                .flat_map(|r| r.unwrap().1)
+                .collect();
+            assert_eq!(rebuilt, data, "reassembly mismatch at len {len}");
+        }
     }
 
     #[test]

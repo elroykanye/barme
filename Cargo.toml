@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT"
 repository = "https://github.com/elroykanye/barme"
 
@@ -32,6 +32,8 @@ serde_json = "1"
 thiserror = "2"
 hex = "0.4"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io", "io-util"] }
+futures-util = "0.3"
 axum = "0.8"
 tracing = "0.1"
 tracing-subscriber = "0.3"

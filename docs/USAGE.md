@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.2.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.3.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -76,8 +76,9 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     s3_addr      = "0.0.0.0:9000"
     cdn_addr     = "0.0.0.0:7375"
     console_addr = "0.0.0.0:7374"
-    # Largest accepted upload, in bytes. Uploads buffer in memory, so this caps
-    # per-request memory. Over it gets 413. Default 512 MiB.
+    # Largest accepted single object, in bytes. Uploads stream (memory stays
+    # flat), so this is a size ceiling, not a memory one. Over it gets 413.
+    # Default 512 MiB.
     max_upload_bytes = 536870912
 
     [credentials]

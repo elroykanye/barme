@@ -11,6 +11,8 @@ barme-semantic.workspace = true
 barme-auth.workspace = true
 axum.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 base64 = "0.22"
