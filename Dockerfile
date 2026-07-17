@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # 2) Build a static barmed against musl. rust:alpine builds musl-native, so the
-#    result runs on a bare Alpine (or scratch) with no libc to ship.
+#    result runs on a bare Alpine with no libc to ship.
 FROM rust:1-alpine AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
@@ -22,9 +22,14 @@ ENV BARME_SKIP_WEB_BUILD=1
 RUN cargo build --release -p barmed --features ui \
     && strip target/release/barmed
 
-# 3) Runtime image: just the binary and CA roots.
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# 3) Runtime image: debian-slim. It ships a real shell (dash + coreutils) for
+#    `docker exec` and, unlike Alpine, carries no busybox — so it sidesteps the
+#    unpatched busybox wget CVE. The barmed binary is static musl, so it runs
+#    here with no glibc dependency despite the Debian base.
+FROM debian:stable-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/barmed /usr/local/bin/barmed
 # Persist the store by mounting a volume here.
 ENV BARME_DATA_DIR=/data
