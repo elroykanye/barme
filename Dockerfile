@@ -22,14 +22,14 @@ ENV BARME_SKIP_WEB_BUILD=1
 RUN cargo build --release -p barmed --features ui \
     && strip target/release/barmed
 
-# 3) Runtime image: debian-slim. It ships a real shell (dash + coreutils) for
-#    `docker exec` and, unlike Alpine, carries no busybox — so it sidesteps the
-#    unpatched busybox wget CVE. The barmed binary is static musl, so it runs
-#    here with no glibc dependency despite the Debian base.
-FROM debian:stable-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# 3) Runtime image: a bare Alpine with just the binary and CA roots. It keeps a
+#    real shell for `docker exec` and stays tiny (~15 MB vs debian-slim's ~90).
+#    Alpine's busybox carries CVE-2025-60876 (a wget request-target CRLF
+#    injection) with no upstream fix as of mid-2026, but the path is unreachable
+#    here: barmed never invokes busybox wget. We accept that one flagged CVE
+#    rather than ship debian-slim, which has a larger vulnerable surface overall.
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates
 COPY --from=build /src/target/release/barmed /usr/local/bin/barmed
 # Persist the store by mounting a volume here.
 ENV BARME_DATA_DIR=/data
