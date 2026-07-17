@@ -48,7 +48,11 @@ impl<'a> Gc<'a> {
     /// entry whose manifest is missing is skipped, not fatal: it can't make a
     /// present chunk unreachable, and the walk must not fail on a gap.
     pub fn mark(&self) -> Result<HashSet<Hash>> {
-        let mut reachable = HashSet::new();
+        // In-flight chunks come first: an upload that has written chunks but not
+        // yet committed its pointer is invisible to the pointer walk below, so
+        // without this a tight grace window could erase live upload data. The
+        // pin set is the authoritative "don't touch, in use right now" signal.
+        let mut reachable: HashSet<Hash> = self.store.chunks.pinned();
         let mut seen = HashSet::new();
 
         for bucket in self.store.pointers.buckets()? {
@@ -102,5 +106,56 @@ impl<'a> Gc<'a> {
 
         self.store.chunks.save_condemned(&condemned)?;
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A chunk written by an in-flight upload — on disk, no pointer yet — must
+    /// survive GC even with a zero grace window and repeated sweeps in the same
+    /// instant. This is the exact data-loss race: without the pin, sweep 1
+    /// condemns it and sweep 2 erases it before the upload commits, and the
+    /// client still gets a success for an object missing its bytes.
+    #[test]
+    fn pinned_in_flight_chunk_survives_aggressive_gc() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let gc = Gc::new(&store, Duration::from_secs(0)); // zero grace: worst case
+
+        let h = store.chunks.put(b"chunk from a live upload").unwrap();
+        store.chunks.pin(&h); // engine pins the instant it's stored
+
+        // Hammer GC while the "upload" is still in progress.
+        for t in 0..5 {
+            let s = gc.sweep(t).unwrap();
+            assert_eq!(s.erased, 0, "erased a pinned in-flight chunk");
+        }
+        assert!(store.chunks.has(&h), "pinned chunk was reclaimed mid-upload");
+
+        // Upload commits, pin released; chunk is now reachable by other means in
+        // a real object, but even bare it is simply collectible garbage now.
+        store.chunks.unpin(&[h]);
+        gc.sweep(100).unwrap(); // condemn
+        gc.sweep(100).unwrap(); // erase (grace 0)
+        assert!(!store.chunks.has(&h), "unpinned orphan should be collectible");
+    }
+
+    /// The pin set must not wedge normal collection: an unpinned, unreferenced
+    /// chunk (e.g. left by a crashed upload, whose pins died with the process) is
+    /// still reclaimed on schedule.
+    #[test]
+    fn unpinned_orphan_is_still_collected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let gc = Gc::new(&store, Duration::from_secs(10));
+
+        let h = store.chunks.put(b"orphan from a crashed upload").unwrap();
+        assert_eq!(gc.sweep(1000).unwrap().condemned, 1); // condemned at 1000
+        assert_eq!(gc.sweep(1005).unwrap().erased, 0); // still inside grace
+        assert!(store.chunks.has(&h));
+        assert_eq!(gc.sweep(1011).unwrap().erased, 1); // past grace: gone
+        assert!(!store.chunks.has(&h));
     }
 }

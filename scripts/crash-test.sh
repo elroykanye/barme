@@ -45,6 +45,24 @@ LEDGER="$(mktemp)"     # acknowledged uploads: key<TAB>sha256
 SCRATCH="$(mktemp -d)" # generated payloads and downloads
 SRV_PID=""
 
+# Optional: run GC hot (GC_GRACE=<secs>) so kills land while GC is sweeping and
+# erasing — the crash-plus-collection combination. A committed object must still
+# survive even if a crash interrupts a sweep mid-erase.
+CFG_ARG=""
+if [[ -n "${GC_GRACE:-}" ]]; then
+  CFG="$SCRATCH/barme.toml"
+  cat >"$CFG" <<EOF
+data_dir = "$DATA_DIR"
+gc_grace_secs = $GC_GRACE
+gc_interval_secs = 1
+[credentials]
+access_key = "barme"
+secret_key = "barme"
+EOF
+  CFG_ARG="$CFG"
+  echo "GC hot: grace=${GC_GRACE}s, sweep=1s"
+fi
+
 cleanup() {
   [[ -n "$SRV_PID" ]] && kill -9 "$SRV_PID" 2>/dev/null
   pkill -9 -P $$ 2>/dev/null
@@ -53,8 +71,12 @@ cleanup() {
 trap cleanup EXIT
 
 start_server() {
-  BARME_DATA_DIR="$DATA_DIR" BARME_ACCESS_KEY=barme BARME_SECRET_KEY=barme \
-    "$BIN" >"$SCRATCH/barmed.log" 2>&1 &
+  if [[ -n "$CFG_ARG" ]]; then
+    BARME_CONFIG="$CFG_ARG" "$BIN" >"$SCRATCH/barmed.log" 2>&1 &
+  else
+    BARME_DATA_DIR="$DATA_DIR" BARME_ACCESS_KEY=barme BARME_SECRET_KEY=barme \
+      "$BIN" >"$SCRATCH/barmed.log" 2>&1 &
+  fi
   SRV_PID=$!
   # Wait for readiness (up to ~10s).
   for _ in $(seq 1 100); do

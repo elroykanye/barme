@@ -77,6 +77,9 @@ impl IntoResponse for NativeError {
             NativeError::Engine(e @ EngineError::Upload(..)) => {
                 (StatusCode::BAD_REQUEST, e.to_string()).into_response()
             }
+            NativeError::Engine(e) if e.is_bad_input() => {
+                (StatusCode::BAD_REQUEST, e.to_string()).into_response()
+            }
             NativeError::Engine(e) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }

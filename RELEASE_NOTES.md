@@ -1,46 +1,57 @@
-# barme 0.4.0
+# barme 0.4.1
 
-Durability. A write that barme acknowledged now survives a hard kill of the
-process, byte-for-byte, and the server restarts clean on the same data dir. This
-is the first of the changes that make a v1 mean something.
+Correctness under concurrency and garbage collection, found by an aggressive
+stress campaign against 0.4.0. Three real defects fixed, all with regression
+tests and adversarial harnesses.
 
-## What changed
+## Fixes
 
-- **Durable atomic writes.** Every store write already synced the file's contents
-  and swapped it in with an atomic rename. It now also **fsyncs the containing
-  directory after the rename**, so the rename itself survives power loss — a
-  synced file whose directory entry was lost is still a lost file. New shard
-  directories sync their parent too. (No-op on Windows, where a directory isn't
-  fsync-able and NTFS journals its own metadata; Linux is the deploy target.)
-- **Crash recovery on startup.** A process killed between creating a temp file and
-  renaming it used to strand that temp file in a shard directory — and because
-  chunk names are hashes, the stray file could trip the garbage collector's walk.
-  Writes now use a known temp prefix, the shard walkers skip anything that isn't a
-  chunk, and **startup reaps any leftover temp files** and logs how many. A clean
-  shutdown recovers zero.
-- **Proven, not asserted.** A new `kill -9` harness (`scripts/crash-test.sh`) runs
-  rounds of concurrent uploads, hard-kills the daemon mid-write, restarts, and
-  checks that every acknowledged object still downloads and matches its hash.
-  Verified: **8 crash cycles, 47 acknowledged objects, zero lost or corrupted**,
-  with recovery reaping stranded temp files every round.
+- **Concurrent writes to one key no longer lose versions.** The pointer file is
+  read-modify-write, and it had no serialization: 24 threads writing the same key
+  landed **1** version in history, not 24 — 23 acknowledged writes silently
+  dropped. Writes to a key now take a per-key commit lock (sharded, so different
+  keys still run fully parallel and chunking stays off the lock). All 24 versions
+  are now kept. This directly backs the store's "every write keeps the previous
+  version" promise.
+- **GC can no longer erase an in-flight upload's chunks.** A streaming upload
+  writes all its chunks before committing its pointer, so those chunks are
+  unreferenced for the whole upload. GC's own module doc promised a guard against
+  reaping young chunks, but the guard wasn't implemented — with a tight grace
+  window a sweep could condemn and erase a live upload's chunks, then the client
+  got a success for an object missing its bytes. Uploads now **pin** each chunk
+  the instant it's stored and unpin once the pointer commits; GC treats pinned
+  chunks as reachable, so a sweep can't touch them no matter how aggressive the
+  grace window. A crash still drops the pins, so a crashed upload's orphans are
+  collected normally.
+- **Malformed pot names return 400, not 500.** A pot name containing a slash or
+  `..` (e.g. `/objects/..%2F..%2Fescape/k`) is rejected safely by the store, but
+  the door surfaced it as a 500. It's a client error and now answers 400 on both
+  the native and S3 doors. (The store already contained the input — nothing
+  escaped; this is about the right status code.)
+- **`barmed` reports the right version.** The daemon crate pinned its own
+  `0.3.0` instead of inheriting the workspace version, so the 0.4.0 binary
+  reported `0.3.0`. It now tracks the release version.
+
+## Hardening (tests + harnesses)
+
+- `scripts/crash-test.sh` gained a hot-GC mode (`GC_GRACE=`): `kill -9` mid-write
+  *while GC actively sweeps and erases*. Verified: 8 crash cycles under a 2s grace
+  with 1s sweeps, 62 objects, zero lost.
+- `scripts/abuse-test.sh`: a battery of hostile HTTP inputs (overlong keys, path
+  traversal in keys and pot names, control chars, empty/at-cap/over-cap bodies,
+  bad auth, malformed JSON, huge headers) plus uploads under `grace=0` GC. The
+  server survives every input and kept all ~290 objects intact.
+- New unit/integration tests: in-flight pin survival under aggressive GC, orphan
+  collection still works, and concurrent same-key / distinct-key write invariants.
 
 ## Upgrading
 
-Drop-in. On-disk format is unchanged; an existing 0.3.0 data dir opens as-is. The
-first start after an unclean 0.3.0 shutdown will log a one-line recovery notice if
-it reaps any temp files.
-
-## Running it
-
-Download the binary for your platform below, then `./barmed`. Console on
-`http://localhost:7374`, API on `:7373` (docs at `:7373/docs`), S3 on `:9000`,
-CDN on `:7375`. Default login `barme:barme`; override with `BARME_ACCESS_KEY` /
-`BARME_SECRET_KEY`.
+Drop-in. On-disk format unchanged; a 0.4.0 (or 0.3.x) data dir opens as-is.
 
 ## Docker
 
 ```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.0
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.1
 ```
 
 ## Known limits
@@ -52,4 +63,4 @@ docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data el
   short pot).
 - `barmed` binds IPv4 (`0.0.0.0`); on a dual-stack host reach it via `127.0.0.1`
   rather than `localhost`.
-- Image codecs (JPEG XL, AVIF) are routed but not yet transcoding. Single node.
+- Single node. Image codecs (JPEG XL, AVIF) are routed but not yet transcoding.

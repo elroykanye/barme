@@ -56,6 +56,7 @@ impl IntoResponse for S3Error {
             S3Error::Engine(e @ EngineError::Upload(..)) => {
                 (StatusCode::BAD_REQUEST, e.to_string())
             }
+            S3Error::Engine(e) if e.is_bad_input() => (StatusCode::BAD_REQUEST, e.to_string()),
             S3Error::Engine(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             S3Error::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };

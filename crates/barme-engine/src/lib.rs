@@ -22,7 +22,11 @@ use barme_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Number of pointer-commit lock shards. A key maps to one shard, so writes to
+/// the same key serialize while writes to different keys almost always don't.
+const KEY_LOCK_SHARDS: usize = 256;
 
 /// Emitted after a successful write, for anything that wants to react to new
 /// objects (the semantic layer and webhooks). Carries only the object's
@@ -73,6 +77,19 @@ pub enum EngineError {
     /// body, or an I/O error on the socket).
     #[error("reading upload: {0}")]
     Upload(#[source] std::io::Error),
+}
+
+impl EngineError {
+    /// True when the error is caused by malformed client input — a bad key or a
+    /// bad pot name — so the front doors can answer 400 instead of a misleading
+    /// 500. A pot name with a slash or `..` is rejected deep in the store as
+    /// `BadBucket`; that's the caller's fault, not the server's.
+    pub fn is_bad_input(&self) -> bool {
+        matches!(
+            self,
+            EngineError::InvalidKey(_) | EngineError::Store(StoreError::BadBucket(_))
+        )
+    }
 }
 
 /// Filesystem filename-length limit, in bytes. The stores hex-encode `(pot,
@@ -146,6 +163,11 @@ pub struct Engine {
     store: Store,
     policy: Policy,
     write_hook: Option<WriteHook>,
+    /// Per-key commit locks. The pointer file is read-modify-write (read the
+    /// history, append a version, rewrite), so two concurrent writers to one key
+    /// would otherwise clobber each other and drop versions. A key hashes to one
+    /// shard; holding it across the commit serializes same-key writers only.
+    key_locks: Vec<Mutex<()>>,
 }
 
 impl Engine {
@@ -154,7 +176,25 @@ impl Engine {
             store: Store::open(root)?,
             policy,
             write_hook: None,
+            key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
         })
+    }
+
+    /// Lock the commit shard for a key. Held across the pointer read-modify-write
+    /// so concurrent writes to the same key can't lose a version; different keys
+    /// hash to different shards and run in parallel.
+    fn key_lock(&self, bucket: &str, key: &str) -> MutexGuard<'_, ()> {
+        use std::hash::{Hash as _, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bucket.hash(&mut h);
+        0u8.hash(&mut h); // separator so ("ab","c") and ("a","bc") differ
+        key.hash(&mut h);
+        let idx = (h.finish() as usize) % self.key_locks.len();
+        // A poisoned lock only means a prior writer panicked mid-commit; the
+        // pointer write is atomic, so the data is consistent — take it anyway.
+        self.key_locks[idx]
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     /// Temp files reaped on open because the previous run was killed mid-write.
@@ -182,22 +222,28 @@ impl Engine {
 
         let mut chunks = Vec::new();
         let mut stored_size = 0u64;
+        let mut pins = PinGuard::new(&self.store.chunks);
         for c in barme_chunk::chunk(data) {
             let encoded = ep.codec.encode(c.data)?;
             stored_size += encoded.len() as u64;
-            chunks.push(self.store.chunks.put(&encoded)?);
+            let h = self.store.chunks.put(&encoded)?;
+            pins.pin(h);
+            chunks.push(h);
         }
 
-        let object_id = self.finalize_write(
-            bucket,
-            key,
-            content_type,
-            &ep,
-            chunks,
-            stored_size,
-            data.len() as u64,
-            sha256_hex(data),
-        )?;
+        let object_id = {
+            let _commit = self.key_lock(bucket, key);
+            self.finalize_write(
+                bucket,
+                key,
+                content_type,
+                &ep,
+                chunks,
+                stored_size,
+                data.len() as u64,
+                sha256_hex(data),
+            )?
+        };
 
         if let Some(hook) = &self.write_hook {
             hook(WriteEvent {
@@ -236,6 +282,10 @@ impl Engine {
         let mut stored_size = 0u64;
         let mut orig_size = 0u64;
         let mut hasher = Sha256::new();
+        // Pin each chunk as it's stored so GC treats the whole in-flight object
+        // as reachable until the pointer commits. The guard unpins on any exit,
+        // including the TooLarge abort below and a panic.
+        let mut pins = PinGuard::new(&self.store.chunks);
 
         for item in barme_chunk::chunk_stream(reader) {
             let (_raw_hash, data) = item.map_err(EngineError::Upload)?;
@@ -246,12 +296,16 @@ impl Engine {
             hasher.update(&data);
             let encoded = ep.codec.encode(&data)?;
             stored_size += encoded.len() as u64;
-            chunks.push(self.store.chunks.put(&encoded)?);
+            let h = self.store.chunks.put(&encoded)?;
+            pins.pin(h);
+            chunks.push(h);
         }
         let sha256 = hex::encode(hasher.finalize());
 
-        let object_id =
-            self.finalize_write(bucket, key, content_type, &ep, chunks, stored_size, orig_size, sha256)?;
+        let object_id = {
+            let _commit = self.key_lock(bucket, key);
+            self.finalize_write(bucket, key, content_type, &ep, chunks, stored_size, orig_size, sha256)?
+        };
 
         if let Some(hook) = &self.write_hook {
             // No bytes in the event: a reactor that needs the content reads it
@@ -609,6 +663,7 @@ impl Engine {
         if self.store.manifests.get(object_id)?.is_none() {
             return Err(EngineError::DanglingPointer(*object_id));
         }
+        let _commit = self.key_lock(bucket, key);
         self.store.pointers.set(bucket, key, object_id)?;
         self.store.reverse.add(object_id, bucket, key)?;
         Ok(())
@@ -811,6 +866,7 @@ impl Engine {
         if object_id != manifest.object_id {
             return Err(EngineError::Integrity(manifest.object_id));
         }
+        let _commit = self.key_lock(bucket, key);
         self.store.pointers.set(bucket, key, &object_id)?;
         self.store.reverse.add(&object_id, bucket, key)?;
         Ok(object_id)
@@ -888,6 +944,34 @@ struct EffectivePolicy {
     level: i32,
     fidelity: Fidelity,
     route: Route,
+}
+
+/// Pins the chunks of an in-flight write so GC treats them as reachable until
+/// the pointer commits, and releases every pin on drop — so a `TooLarge` abort,
+/// an I/O error, or a panic mid-upload can never strand a chunk pinned forever.
+struct PinGuard<'a> {
+    chunks: &'a barme_store::ChunkStore,
+    pinned: Vec<Hash>,
+}
+
+impl<'a> PinGuard<'a> {
+    fn new(chunks: &'a barme_store::ChunkStore) -> Self {
+        PinGuard {
+            chunks,
+            pinned: Vec::new(),
+        }
+    }
+
+    fn pin(&mut self, hash: Hash) {
+        self.chunks.pin(&hash);
+        self.pinned.push(hash);
+    }
+}
+
+impl Drop for PinGuard<'_> {
+    fn drop(&mut self) {
+        self.chunks.unpin(&self.pinned);
+    }
 }
 
 /// Reject keys the store can't hold before we do any work. An empty key has no

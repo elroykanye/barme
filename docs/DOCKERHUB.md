@@ -28,7 +28,7 @@ Store and read an object:
 ## Tags
 
 - `latest` — most recent release
-- `0.4.0`, `0.4.x` — pinned versions
+- `0.4.1`, `0.4.x` — pinned versions
 
 ## Image
 

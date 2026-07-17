@@ -4,8 +4,9 @@
 
 use crate::{shard, write_atomic, Result, StoreError};
 use barme_core::Hash;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Name of the condemned-set file, sitting at the chunk root beside the shard
 /// dirs. Leading dot keeps it out of `all()`, which only descends the two-hex
@@ -14,13 +15,43 @@ const CONDEMNED: &str = ".condemned";
 
 pub struct ChunkStore {
     root: PathBuf,
+    /// Chunks written by an upload still in progress: on disk but not yet
+    /// referenced by any pointer, so `mark` can't see them. Held in memory only.
+    /// GC treats these as reachable, so a sweep can never erase a chunk out from
+    /// under a live upload no matter how tight the grace window is. A crash drops
+    /// the set — correct, since a crashed upload's orphan chunks *are* garbage and
+    /// should be collected normally.
+    pinned: Arc<Mutex<HashSet<Hash>>>,
 }
 
 impl ChunkStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
-        Ok(ChunkStore { root })
+        Ok(ChunkStore {
+            root,
+            pinned: Arc::new(Mutex::new(HashSet::new())),
+        })
+    }
+
+    /// Pin a chunk as in-flight so GC won't reclaim it before its object commits.
+    /// Call right after `put`; pair with `unpin` once the pointer is set.
+    pub fn pin(&self, hash: &Hash) {
+        self.pinned.lock().unwrap().insert(*hash);
+    }
+
+    /// Release in-flight pins once the object is committed (its chunks are now
+    /// reachable through the pointer) or the upload was abandoned.
+    pub fn unpin(&self, hashes: &[Hash]) {
+        let mut set = self.pinned.lock().unwrap();
+        for h in hashes {
+            set.remove(h);
+        }
+    }
+
+    /// Snapshot of currently pinned chunks. GC unions this into its reachable set.
+    pub fn pinned(&self) -> HashSet<Hash> {
+        self.pinned.lock().unwrap().clone()
     }
 
     /// Store bytes and return their address. If an identical chunk is already
