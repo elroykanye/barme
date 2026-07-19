@@ -20,8 +20,9 @@ use barme_core::{
 };
 use barme_store::{Store, StoreError};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Number of pointer-commit lock shards. A key maps to one shard, so writes to
@@ -77,6 +78,13 @@ pub enum EngineError {
     /// body, or an I/O error on the socket).
     #[error("reading upload: {0}")]
     Upload(#[source] std::io::Error),
+    /// A multipart operation named an upload id the server doesn't know: never
+    /// created, already completed or aborted, or lost to a process restart.
+    #[error("no such upload: {0}")]
+    NoSuchUpload(String),
+    /// CompleteMultipartUpload named a part number that was never uploaded.
+    #[error("invalid part: {0} was not uploaded")]
+    InvalidPart(u32),
 }
 
 impl EngineError {
@@ -87,7 +95,9 @@ impl EngineError {
     pub fn is_bad_input(&self) -> bool {
         matches!(
             self,
-            EngineError::InvalidKey(_) | EngineError::Store(StoreError::BadBucket(_))
+            EngineError::InvalidKey(_)
+                | EngineError::InvalidPart(_)
+                | EngineError::Store(StoreError::BadBucket(_))
         )
     }
 }
@@ -168,6 +178,14 @@ pub struct Engine {
     /// would otherwise clobber each other and drop versions. A key hashes to one
     /// shard; holding it across the commit serializes same-key writers only.
     key_locks: Vec<Mutex<()>>,
+    /// In-progress multipart uploads, keyed by upload id. State is in memory
+    /// only: a restart abandons them, and their already-stored part chunks are
+    /// unreferenced, so GC reclaims them like any other orphan. Chunks are pinned
+    /// while staged so a sweep can't erase them before the upload completes.
+    multipart: Mutex<HashMap<String, StagedUpload>>,
+    /// Mixed into new upload ids so two uploads to the same key in the same
+    /// second still get distinct ids.
+    mp_counter: AtomicU64,
 }
 
 impl Engine {
@@ -177,6 +195,8 @@ impl Engine {
             policy,
             write_hook: None,
             key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
+            multipart: Mutex::new(HashMap::new()),
+            mp_counter: AtomicU64::new(0),
         })
     }
 
@@ -193,6 +213,8 @@ impl Engine {
             policy,
             write_hook: None,
             key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
+            multipart: Mutex::new(HashMap::new()),
+            mp_counter: AtomicU64::new(0),
         })
     }
 
@@ -336,6 +358,226 @@ impl Engine {
             });
         }
         Ok(object_id)
+    }
+
+    // ---- multipart upload ----
+
+    /// Begin a multipart upload. Validates the key and lock up front and
+    /// snapshots the pot's effective policy, so every part encodes exactly the
+    /// way the final manifest will record even if the pot's policy changes
+    /// mid-upload. Returns an opaque upload id.
+    pub fn create_multipart(&self, bucket: &str, key: &str, content_type: &str) -> Result<String> {
+        validate_key(bucket, key)?;
+        self.ensure_unlocked(bucket, key)?;
+        let ep = self.effective_policy(bucket, content_type)?;
+        let n = self.mp_counter.fetch_add(1, Ordering::Relaxed);
+        let upload_id = sha256_hex(format!("{bucket}/{key}/{}/{n}", now_unix()).as_bytes());
+        let staged = StagedUpload {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            content_type: content_type.to_string(),
+            codec_name: ep.codec_name,
+            level: ep.level,
+            fidelity: ep.fidelity,
+            route: ep.route,
+            parts: BTreeMap::new(),
+            pinned: Vec::new(),
+        };
+        self.multipart.lock().unwrap().insert(upload_id.clone(), staged);
+        Ok(upload_id)
+    }
+
+    /// Stream one part into the store. Chunks are cut and stored exactly as in a
+    /// single streaming write, then pinned so GC leaves them alone until the
+    /// upload completes or aborts. Re-uploading a part number replaces its
+    /// record; the superseded chunks stay pinned until the whole upload
+    /// finalizes, then fall out of reach and GC reclaims them. Returns the part's
+    /// ETag (hex SHA-256 of its original bytes) and size.
+    pub fn upload_part<R: std::io::Read>(
+        &self,
+        upload_id: &str,
+        part_number: u32,
+        reader: R,
+        max_bytes: u64,
+    ) -> Result<PartMeta> {
+        // Snapshot the codec for this upload; fail fast on an unknown id.
+        let (codec_name, level) = {
+            let map = self.multipart.lock().unwrap();
+            let up = map
+                .get(upload_id)
+                .ok_or_else(|| EngineError::NoSuchUpload(upload_id.to_string()))?;
+            (up.codec_name.clone(), up.level)
+        };
+        let codec = build_codec(&codec_name, level)?;
+
+        // Pin each chunk as it lands through a guard, so any early return in this
+        // loop — a client disconnect (`Upload`), an encode/store error, or the
+        // size cap — releases the pins instead of leaking them. On success the
+        // pins are handed to the staged upload (`disarm`), which unpins them at
+        // complete/abort.
+        let mut pins = PinGuard::new(&self.store.chunks);
+        let mut chunks = Vec::new();
+        let mut stored_size = 0u64;
+        let mut orig_size = 0u64;
+        let mut hasher = Sha256::new();
+        for item in barme_chunk::chunk_stream(reader) {
+            let (_raw_hash, data) = item.map_err(EngineError::Upload)?;
+            orig_size += data.len() as u64;
+            if orig_size > max_bytes {
+                return Err(EngineError::TooLarge { limit: max_bytes });
+            }
+            hasher.update(&data);
+            let encoded = codec.encode(&data)?;
+            stored_size += encoded.len() as u64;
+            let h = self.store.chunks.put(&encoded)?;
+            pins.pin(h);
+            chunks.push(h);
+        }
+        let etag = hex::encode(hasher.finalize());
+
+        let mut map = self.multipart.lock().unwrap();
+        match map.get_mut(upload_id) {
+            Some(up) => {
+                up.pinned.extend(chunks.iter().copied());
+                up.parts.insert(
+                    part_number,
+                    StagedPart { chunks, stored_size, orig_size, etag: etag.clone() },
+                );
+                // The staged upload owns the pins now; don't unpin on drop.
+                pins.disarm();
+                Ok(PartMeta { etag, size: orig_size })
+            }
+            None => {
+                // Aborted out from under us mid-part; `pins` drops here and
+                // unpins, so the orphaned chunks are reclaimable.
+                Err(EngineError::NoSuchUpload(upload_id.to_string()))
+            }
+        }
+    }
+
+    /// Finish a multipart upload: concatenate the named parts' chunks in order,
+    /// re-hash the whole object to recover its original-bytes digest (part
+    /// digests don't compose into it), write one manifest, and move the pointer.
+    /// `order` is the client's part list; empty means every staged part,
+    /// ascending. Returns the object id, which is also the completed ETag.
+    pub fn complete_multipart(&self, upload_id: &str, order: &[u32]) -> Result<Hash> {
+        // Take the upload out up front so a second concurrent complete can't
+        // double-commit. On any error we don't reinsert; the client retries fresh.
+        let mut staged = self
+            .multipart
+            .lock()
+            .unwrap()
+            .remove(upload_id)
+            .ok_or_else(|| EngineError::NoSuchUpload(upload_id.to_string()))?;
+
+        // Release the in-flight pins on every exit from here on. On success the
+        // chunks are reachable through the new pointer; on any failure below
+        // (bad part number, missing chunk, decode/commit error) they're orphans.
+        // Either way the pins must come off — a bare `?` return must not leak
+        // them, and the upload is already out of the map so it can't be aborted.
+        let _release = ReleasePins {
+            chunks: &self.store.chunks,
+            hashes: std::mem::take(&mut staged.pinned),
+        };
+
+        let order: Vec<u32> = if order.is_empty() {
+            staged.parts.keys().copied().collect()
+        } else {
+            order.to_vec()
+        };
+
+        let decoder = barme_codec::decoder_for(&staged.codec_name)?;
+        let mut all_chunks: Vec<Hash> = Vec::new();
+        let mut orig_size = 0u64;
+        let mut stored_size = 0u64;
+        let mut hasher = Sha256::new();
+        for pn in &order {
+            let part = staged.parts.get(pn).ok_or(EngineError::InvalidPart(*pn))?;
+            for h in &part.chunks {
+                let stored = self
+                    .store
+                    .chunks
+                    .get(h)?
+                    .ok_or(EngineError::MissingChunk(*h, Hash::of(b"")))?;
+                hasher.update(&decoder.decode(&stored)?);
+                all_chunks.push(*h);
+            }
+            orig_size += part.orig_size;
+            stored_size += part.stored_size;
+        }
+        let sha256 = hex::encode(hasher.finalize());
+
+        let ep = EffectivePolicy {
+            codec: build_codec(&staged.codec_name, staged.level)?,
+            codec_name: staged.codec_name.clone(),
+            level: staged.level,
+            fidelity: staged.fidelity,
+            route: staged.route,
+        };
+
+        let object_id = {
+            let _commit = self.key_lock(&staged.bucket, &staged.key);
+            self.finalize_write(
+                &staged.bucket,
+                &staged.key,
+                &staged.content_type,
+                &ep,
+                all_chunks,
+                stored_size,
+                orig_size,
+                sha256,
+            )?
+        };
+
+        // `_release` drops at end of scope and unpins the staged chunks — now
+        // reachable through the pointer, so unpinning is safe.
+
+        if let Some(hook) = &self.write_hook {
+            hook(WriteEvent {
+                object_id,
+                tenant: self.policy.tenant.clone(),
+                content_type: staged.content_type.clone(),
+                bucket: staged.bucket.clone(),
+                key: staged.key.clone(),
+            });
+        }
+        Ok(object_id)
+    }
+
+    /// Abandon a multipart upload. Idempotent: an unknown id is a no-op. The
+    /// staged part chunks lose their pins and become GC-eligible orphans.
+    pub fn abort_multipart(&self, upload_id: &str) -> Result<()> {
+        if let Some(staged) = self.multipart.lock().unwrap().remove(upload_id) {
+            self.store.chunks.unpin(&staged.pinned);
+        }
+        Ok(())
+    }
+
+    /// The parts staged so far for an upload, ascending, for ListParts. `None`
+    /// if the upload id is unknown.
+    pub fn list_parts(&self, upload_id: &str) -> Result<Option<MultipartListing>> {
+        let map = self.multipart.lock().unwrap();
+        let Some(up) = map.get(upload_id) else {
+            return Ok(None);
+        };
+        let parts = up
+            .parts
+            .iter()
+            .map(|(n, p)| (*n, PartMeta { etag: p.etag.clone(), size: p.orig_size }))
+            .collect();
+        Ok(Some(MultipartListing {
+            bucket: up.bucket.clone(),
+            key: up.key.clone(),
+            parts,
+        }))
+    }
+
+    /// How many chunks are currently pinned as in-flight — uncommitted single
+    /// writes plus staged multipart parts. It returns to zero once nothing is
+    /// mid-upload, so a non-zero count with no active upload is a pin leak. Used
+    /// by tests and available for ops introspection.
+    pub fn pinned_chunk_count(&self) -> usize {
+        self.store.chunks.pinned().len()
     }
 
     /// The pot's effective storage policy: its own overrides where set, the
@@ -967,6 +1209,45 @@ struct EffectivePolicy {
     route: Route,
 }
 
+/// Public metadata for one uploaded part: its ETag (hex SHA-256 of the part's
+/// original bytes) and original size in bytes.
+#[derive(Debug, Clone)]
+pub struct PartMeta {
+    pub etag: String,
+    pub size: u64,
+}
+
+/// What [`Engine::list_parts`] returns: the target pot/key and the staged parts.
+#[derive(Debug, Clone)]
+pub struct MultipartListing {
+    pub bucket: String,
+    pub key: String,
+    pub parts: Vec<(u32, PartMeta)>,
+}
+
+/// One staged part, held in memory between UploadPart and completion.
+struct StagedPart {
+    chunks: Vec<Hash>,
+    stored_size: u64,
+    orig_size: u64,
+    etag: String,
+}
+
+/// An in-progress multipart upload. The codec settings are snapshotted at
+/// creation so every part encodes the same way the final manifest records.
+struct StagedUpload {
+    bucket: String,
+    key: String,
+    content_type: String,
+    codec_name: String,
+    level: i32,
+    fidelity: Fidelity,
+    route: Route,
+    parts: BTreeMap<u32, StagedPart>,
+    /// Every chunk pinned across the upload's lifetime, released on complete/abort.
+    pinned: Vec<Hash>,
+}
+
 /// Pins the chunks of an in-flight write so GC treats them as reachable until
 /// the pointer commits, and releases every pin on drop — so a `TooLarge` abort,
 /// an I/O error, or a panic mid-upload can never strand a chunk pinned forever.
@@ -987,11 +1268,35 @@ impl<'a> PinGuard<'a> {
         self.chunks.pin(&hash);
         self.pinned.push(hash);
     }
+
+    /// Hand the pins off to a longer-lived owner (a staged multipart upload):
+    /// the chunks stay pinned and this guard's `Drop` becomes a no-op. Call only
+    /// once the hashes are recorded somewhere that will unpin them later.
+    fn disarm(&mut self) {
+        self.pinned.clear();
+    }
 }
 
 impl Drop for PinGuard<'_> {
     fn drop(&mut self) {
         self.chunks.unpin(&self.pinned);
+    }
+}
+
+/// Releases a fixed set of in-flight chunk pins on drop — on *every* exit,
+/// including an early `?` return or a panic. `complete_multipart` uses it: once
+/// an upload is pulled out of the map its chunks are either about to become
+/// reachable through the new pointer (success) or orphans (any failure), so the
+/// in-flight pins must come off either way. Without it, a failed complete would
+/// strand every pinned chunk — a client-triggerable leak.
+struct ReleasePins<'a> {
+    chunks: &'a barme_store::ChunkStore,
+    hashes: Vec<Hash>,
+}
+
+impl Drop for ReleasePins<'_> {
+    fn drop(&mut self) {
+        self.chunks.unpin(&self.hashes);
     }
 }
 
