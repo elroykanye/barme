@@ -7,9 +7,16 @@ license.workspace = true
 [dependencies]
 barme-core.workspace = true
 thiserror.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 tempfile = "3"
+# Secret keys are encrypted at rest (AES-256-GCM) when a master key is present.
+# S3/SigV4 needs the raw secret to verify signatures, so hashing isn't an option;
+# encryption keeps the on-disk key store non-plaintext while the server recovers
+# the secret in memory. See key_store.rs.
+aes-gcm = "0.10"
+getrandom = "0.2"
 
 [dev-dependencies]
 barme-chunk.workspace = true

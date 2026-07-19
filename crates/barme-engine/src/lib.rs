@@ -180,6 +180,22 @@ impl Engine {
         })
     }
 
+    /// Open with a 32-byte master key so access-key secrets are encrypted at
+    /// rest. Everything else is identical to [`open`](Self::open); the key only
+    /// affects the key store. Legacy plaintext key records are migrated on open.
+    pub fn open_encrypted(
+        root: impl AsRef<Path>,
+        policy: Policy,
+        master_key: &[u8; 32],
+    ) -> Result<Self> {
+        Ok(Engine {
+            store: Store::open_encrypted(root, master_key)?,
+            policy,
+            write_hook: None,
+            key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
+        })
+    }
+
     /// Lock the commit shard for a key. Held across the pointer read-modify-write
     /// so concurrent writes to the same key can't lose a version; different keys
     /// hash to different shards and run in parallel.

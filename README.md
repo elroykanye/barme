@@ -16,12 +16,14 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:0.4.2
+      -v barme:/data elroykanye/barme:0.5.0
 
-Console on http://localhost:7374, login `barme` / `barme`. Then store something:
+Console on http://localhost:7374. On first start barme prints a generated owner
+login (access key `barme`, a random secret) — copy it from the logs, or set your
+own with `BARME_ACCESS_KEY` / `BARME_SECRET_KEY`. Then, with that credential:
 
-    curl -u barme:barme -T photo.jpg http://localhost:7373/objects/photos/cat.jpg
-    curl -u barme:barme http://localhost:7373/objects/photos/cat.jpg -o out.jpg
+    curl -u barme:SECRET -T photo.jpg http://localhost:7373/objects/photos/cat.jpg
+    curl -u barme:SECRET http://localhost:7373/objects/photos/cat.jpg -o out.jpg
 
 Or grab a binary from the [releases](https://github.com/elroykanye/barme/releases).
 Full walkthrough in [docs/USAGE.md](docs/USAGE.md).
@@ -98,13 +100,15 @@ search. Config, ports, and the full API are covered in
 
 ## Status
 
-Alpha (v0.4.2). It works end to end, but it's early: uploads and downloads
+Alpha (v0.5.0). It works end to end, but it's early: uploads and downloads
 stream (memory stays flat regardless of object size), an acknowledged write
 survives a hard kill of the process (writes are fsync-durable and the daemon
 recovers on restart), concurrent writes and garbage collection are safe under
-load, and uploads are capped by `max_upload_bytes` (default 512 MiB). Still open before v1: key secrets are stored in the clear (AWS-style)
-and it ships with a default `barme` / `barme` login you should change. Don't put
-anything you can't lose in it yet.
+load, uploads are capped by `max_upload_bytes` (default 512 MiB), there's no
+default login (a random owner is minted on first boot), and access-key secrets
+are encrypted at rest. Still early though — formats and on-disk layout may still
+change before v1, and object contents aren't encrypted. Don't put anything you
+can't lose in it yet.
 
 ## License
 

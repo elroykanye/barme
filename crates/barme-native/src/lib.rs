@@ -169,7 +169,9 @@ fn caller(state: &AppState, headers: &HeaderMap) -> Caller {
     }
     let creds = Credentials::from_records(keys);
     let record = basic(headers).and_then(|(access, secret)| match creds.record(&access) {
-        Some(r) if r.secret_key == secret => Some(r.clone()),
+        // Constant-time compare: a plain `==` on the secret leaks, through
+        // response timing, how many leading bytes a guess got right.
+        Some(r) if barme_auth::secret_eq(&r.secret_key, &secret) => Some(r.clone()),
         _ => None,
     });
     Caller { open: false, record }

@@ -174,13 +174,78 @@ fn print_banner(config: &barme_config::Config, ui: bool) {
     println!("  S3         {}", http_base(&config.s3_addr));
     println!("  CDN        {}", http_base(&config.cdn_addr));
     if let Some(c) = &config.credentials {
-        if c.access_key == "barme" && c.secret_key == "barme" {
-            println!("  login      barme / barme  (default — set BARME_ACCESS_KEY / BARME_SECRET_KEY)");
-        } else {
-            println!("  login      {} / (from config)", c.access_key);
-        }
+        println!("  login      {} / (from config)", c.access_key);
+    } else {
+        println!("  login      (generated on first boot — see the notice below)");
     }
     println!();
+}
+
+/// Resolve the 32-byte master key that encrypts access-key secrets at rest.
+///
+/// Precedence:
+///   1. `BARME_MASTER_KEY` — 64 hex chars (32 bytes). Best for real deployments:
+///      keeping the key out of the data dir protects a stolen backup too.
+///   2. `<data_dir>/master.key` — same hex form, created below on first boot.
+///   3. Freshly generated, written to that file (0600 on Unix), and announced.
+///
+/// Once the file exists it's authoritative, so restarts decrypt the same store.
+/// Losing the key means the encrypted secrets can't be recovered.
+fn resolve_master_key(data_dir: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if let Ok(hexed) = std::env::var("BARME_MASTER_KEY") {
+        return decode_key(&hexed)
+            .ok_or_else(|| "BARME_MASTER_KEY must be 64 hex chars (32 bytes)".into());
+    }
+    let path = std::path::Path::new(data_dir).join("master.key");
+    if let Ok(contents) = std::fs::read_to_string(&path) {
+        return decode_key(contents.trim())
+            .ok_or_else(|| format!("{} is not 64 hex chars (32 bytes)", path.display()).into());
+    }
+    let mut key = [0u8; 32];
+    getrandom::getrandom(&mut key).map_err(|e| format!("rng: {e}"))?;
+    std::fs::create_dir_all(data_dir)?;
+    write_key_file(&path, &key)?;
+    tracing::warn!(
+        "generated a new master key at {} — back it up; encrypted secrets can't be recovered without it",
+        path.display()
+    );
+    Ok(key)
+}
+
+fn decode_key(hexed: &str) -> Option<[u8; 32]> {
+    let bytes = hex::decode(hexed.trim()).ok()?;
+    <[u8; 32]>::try_from(bytes.as_slice()).ok()
+}
+
+/// Write the master key as hex, owner-only where the OS supports it (Unix 0600,
+/// created with those perms so there's no world-readable window). The deploy
+/// target is Linux; other platforms get a plain file.
+fn write_key_file(path: &std::path::Path, key: &[u8; 32]) -> std::io::Result<()> {
+    let hexed = hex::encode(key);
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(hexed.as_bytes())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, hexed.as_bytes())
+    }
+}
+
+/// A random 256-bit secret, hex-encoded, for a generated owner credential.
+fn random_secret() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).expect("OS RNG available");
+    hex::encode(buf)
 }
 
 /// Bind `desired`, rolling forward to the next port if it's already taken, so a
@@ -258,7 +323,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tenant: config.default_policy.tenant.clone(),
         policy_name: config.default_policy.policy_name.clone(),
     };
-    let mut engine = Engine::open(&config.data_dir, policy)?;
+    // Master key for encrypting access-key secrets at rest. Resolved from
+    // BARME_MASTER_KEY, else a 0600 key file in the data dir, else freshly
+    // generated on first boot.
+    let master_key = resolve_master_key(&config.data_dir)?;
+    let mut engine = Engine::open_encrypted(&config.data_dir, policy, &master_key)?;
     if engine.recovered_temp() > 0 {
         tracing::warn!(
             "recovered from unclean shutdown: reaped {} temp file(s) from interrupted writes",
@@ -301,9 +370,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Seed the configured owner key on first run, then report the key count.
+    // Establish the owner credential. Precedence:
+    //   1. a credential set in config/env -> seed it (first run) and use it;
+    //   2. otherwise, on a fresh store, mint a random owner and print it once —
+    //      never a known default anyone on the network could log in with.
     if let Some(c) = &config.credentials {
         engine.ensure_owner(&c.access_key, &c.secret_key)?;
+    } else if engine.list_keys()?.is_empty() {
+        let access = "barme";
+        let secret = random_secret();
+        engine.ensure_owner(access, &secret)?;
+        // Printed to stdout, not the log, and only this once — it is never
+        // recoverable later (the stored secret is encrypted).
+        println!("\n  ============================================================");
+        println!("  Generated an owner credential (no BARME_ACCESS_KEY set).");
+        println!("  Save it now — it is not shown again:");
+        println!("      access key:  {access}");
+        println!("      secret key:  {secret}");
+        println!("  Set BARME_ACCESS_KEY / BARME_SECRET_KEY to use your own.");
+        println!("  ============================================================\n");
     }
     match engine.list_keys() {
         Ok(k) if !k.is_empty() => tracing::info!("{} access key(s); auth enforced", k.len()),

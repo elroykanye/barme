@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.4.2
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.5.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -17,7 +17,12 @@ Ports:
 | 7375 | CDN (public and by-hash delivery) |
 | 9000 | S3 API |
 
-The console is at http://localhost:7374. Default login is `barme` / `barme`; override with `BARME_ACCESS_KEY` and `BARME_SECRET_KEY`. `barmed --help` lists the flags.
+The console is at http://localhost:7374. There is no default login: on first
+start with no credential configured, barme mints a random owner (access key
+`barme`, a random secret) and prints it once in the startup output — copy it
+then. Set your own with `BARME_ACCESS_KEY` and `BARME_SECRET_KEY` (or
+`[credentials]` in `barme.toml`) to skip the generated one. `barmed --help` lists
+the flags.
 
 ## Store and read an object
 
@@ -93,13 +98,25 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     # embed_url   = "http://localhost:11434/api/embeddings"
     # embed_model = "nomic-embed-text"
 
-Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`, `BARME_MAX_UPLOAD_BYTES`. If a port is already taken, barme rolls forward to the next free one.
+Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_MASTER_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`, `BARME_MAX_UPLOAD_BYTES`. If a port is already taken, barme rolls forward to the next free one.
+
+## Credentials and the master key
+
+There is no default login. On first start with none configured, barme mints a random owner and prints it once — save it. Set `BARME_ACCESS_KEY` / `BARME_SECRET_KEY` (or `[credentials]` in `barme.toml`) to use your own.
+
+Access-key secrets are encrypted at rest (AES-256-GCM), not stored in plaintext. Secrets can't be hashed here: the S3 door verifies AWS SigV4, which needs the raw secret to recompute the signature, so the server keeps a recoverable — but encrypted — copy. The encryption key (the "master key") is resolved in this order:
+
+1. `BARME_MASTER_KEY` — 64 hex characters (32 bytes). Best for real deployments: keeping the key in the environment, out of the data dir, protects a stolen backup too. Generate one with `openssl rand -hex 32`.
+2. `<data_dir>/master.key` — created `0600` on first boot if you didn't set the env var.
+3. Otherwise generated fresh on first boot and announced in the log.
+
+**Back the master key up.** Encrypted secrets can't be recovered without it. An existing plaintext key store is migrated to encrypted form automatically the first time it's opened with a master key.
 
 Keys are encoded into a filename, so a pot name plus key must stay under the filesystem's 255-byte filename limit (about 120 key bytes for a short pot). Longer keys are rejected with `400`.
 
-Per-pot settings (compression, public read, lifecycle) are set over the API:
+Per-pot settings (compression, public read, lifecycle) are set over the API (use your credential in place of `KEY:SECRET`):
 
-    curl -u barme:barme -X PUT http://localhost:7373/pots/photos/config \
+    curl -u KEY:SECRET -X PUT http://localhost:7373/pots/photos/config \
       -H 'content-type: application/json' -d '{"public_read": true, "codec": "zstd"}'
 
 ## Sync between two instances

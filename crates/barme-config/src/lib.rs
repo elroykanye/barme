@@ -62,12 +62,11 @@ impl Default for Config {
             // can't exhaust memory. Raise it in barme.toml if your host has the
             // RAM and you push bigger blobs.
             max_upload_bytes: 512 * 1024 * 1024,
-            // A known default so the door isn't open out of the box. Override in
-            // barme.toml or via BARME_ACCESS_KEY / BARME_SECRET_KEY.
-            credentials: Some(Credential {
-                access_key: "barme".into(),
-                secret_key: "barme".into(),
-            }),
+            // No baked-in credential. Set one in barme.toml or via
+            // BARME_ACCESS_KEY / BARME_SECRET_KEY; if none is set, the daemon
+            // mints a random owner on first boot and prints it once, rather than
+            // shipping a known default anyone could log in with.
+            credentials: None,
             embed_url: None,
             embed_model: String::new(),
         }

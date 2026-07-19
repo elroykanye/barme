@@ -17,8 +17,10 @@ read, and efficient sync — without extra machinery.
 - CDN: http://localhost:7375
 - S3 API: http://localhost:9000
 
-Default login is `barme` / `barme`. Change it with `BARME_ACCESS_KEY` and
-`BARME_SECRET_KEY`.
+No default login: on first start with none set, barme mints a random owner and
+prints it once in the logs. Set your own with `BARME_ACCESS_KEY` and
+`BARME_SECRET_KEY`. Access-key secrets are encrypted at rest with a master key
+(`BARME_MASTER_KEY`, else a `0600` `master.key` in `/data`) — back that key up.
 
 Store and read an object:
 
@@ -28,7 +30,7 @@ Store and read an object:
 ## Tags
 
 - `latest` — most recent release
-- `0.4.2`, `0.4.x` — pinned versions
+- `0.5.0`, `0.5.x` — pinned versions
 
 ## Image
 
@@ -47,10 +49,11 @@ Set with environment variables or a mounted `barme.toml`:
 ## Status
 
 Alpha. Works end to end, but it's early: uploads and downloads stream (memory
-stays flat regardless of object size), and an acknowledged write survives a hard
-kill (writes are fsync-durable, the daemon recovers on restart). Key secrets are
-still stored in the clear and it ships with a default login you should change.
-Don't put anything you can't lose in it yet.
+stays flat regardless of object size), an acknowledged write survives a hard kill
+(writes are fsync-durable, the daemon recovers on restart), there's no default
+login (a random owner is minted on first boot), and access-key secrets are
+encrypted at rest. Formats and on-disk layout may still change before v1, and
+object contents aren't encrypted. Don't put anything you can't lose in it yet.
 
 ## Links
 

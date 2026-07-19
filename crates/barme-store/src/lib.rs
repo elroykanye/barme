@@ -11,6 +11,7 @@
 
 mod annotation_store;
 mod chunk_store;
+mod crypto;
 mod key_store;
 mod manifest_store;
 mod meta_store;
@@ -20,6 +21,7 @@ mod webhook_store;
 
 pub use annotation_store::AnnotationStore;
 pub use chunk_store::ChunkStore;
+pub use crypto::Cipher;
 pub use key_store::KeyStore;
 pub use manifest_store::ManifestStore;
 pub use meta_store::MetaStore;
@@ -45,6 +47,11 @@ pub enum StoreError {
     Integrity { addr: String },
     #[error("invalid bucket name: {0:?}")]
     BadBucket(String),
+    /// Encrypting or decrypting a secret at rest failed: a wrong or missing
+    /// master key, a tampered ciphertext, or malformed encoding. The message is
+    /// deliberately vague — a decrypt failure shouldn't say why.
+    #[error("crypto: {0}")]
+    Crypto(String),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -66,17 +73,33 @@ pub struct Store {
 }
 
 impl Store {
+    /// Open with secrets stored as plaintext (no master key). Used by tests and
+    /// unconfigured setups.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(root, None)
+    }
+
+    /// Open with a 32-byte master key: secret keys are encrypted at rest, and any
+    /// legacy plaintext key records are migrated to encrypted form on open.
+    pub fn open_encrypted(root: impl AsRef<Path>, master_key: &[u8; 32]) -> Result<Self> {
+        Self::open_inner(root, Some(*master_key))
+    }
+
+    fn open_inner(root: impl AsRef<Path>, master_key: Option<[u8; 32]>) -> Result<Self> {
         let root = root.as_ref();
         // Reap any temp files a previous crash left behind before anything walks
         // the shard dirs, so a half-written file can't trip an enumerator.
         let recovered_temp = sweep_temp(root)?;
+        let keys = match master_key {
+            Some(k) => KeyStore::open_encrypted(root.join("keys"), Cipher::new(&k))?,
+            None => KeyStore::open(root.join("keys"))?,
+        };
         Ok(Store {
             chunks: ChunkStore::open(root.join("chunks"))?,
             manifests: ManifestStore::open(root.join("manifests"))?,
             pointers: PointerStore::open(root.join("pointers"))?,
             meta: MetaStore::open(root.join("meta"))?,
-            keys: KeyStore::open(root.join("keys"))?,
+            keys,
             annotations: AnnotationStore::open(root.join("annotations"))?,
             reverse: ReverseStore::open(root.join("reverse"))?,
             webhooks: WebhookStore::open(root.join("webhooks"))?,

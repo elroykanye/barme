@@ -35,11 +35,18 @@ pub fn verify_presign(secret: &str, pot: &str, key: &str, exp: u64, sig: &str, n
         return false;
     }
     let expected = presign(secret, pot, key, exp);
-    expected.len() == sig.len()
-        && expected
-            .as_bytes()
-            .iter()
-            .zip(sig.as_bytes())
+    secret_eq(&expected, sig)
+}
+
+/// Constant-time string equality, for comparing secrets and signatures. Runs in
+/// time independent of *where* two equal-length inputs first differ, so an
+/// attacker can't recover a secret byte by byte from response timing. Length is
+/// allowed to short-circuit — it isn't the secret.
+pub fn secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
             .fold(0u8, |acc, (x, y)| acc | (x ^ y))
             == 0
 }
