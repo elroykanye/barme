@@ -1,34 +1,40 @@
 //! S3-compatible front door.
 //!
 //! bucket/key/object maps almost directly onto bucket/pointer/manifest:
-//!   PUT    -> engine write path
-//!   GET    -> engine read path
-//!   DELETE -> move/clear pointer (chunks reclaimed later by GC, never inline)
+//!   PUT    -> engine write path (single, or one part of a multipart upload)
+//!   GET    -> engine read path (or ListParts when `?uploadId` is present)
+//!   DELETE -> move/clear pointer (or AbortMultipartUpload with `?uploadId`)
 //!   HEAD   -> manifest lookup; etag is the content hash
+//!   POST   -> multipart lifecycle: `?uploads` creates, `?uploadId` completes
 //!   List   -> list pointers
-//!   multipart, presigned URLs
 //!
-//! Scope: the parts real clients use first. The long tail of bucket
-//! sub-resources (ACLs, lifecycle, policies) comes later.
+//! Multipart is dispatched by query parameters on the same object path, the way
+//! S3 does it. The long tail of bucket sub-resources (ACLs, lifecycle, policies)
+//! comes later.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path, Request, State},
+    extract::{Path, RawQuery, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{delete, get, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use barme_auth::{authorize, verify_sigv4, Action, Credentials, Principal, SignedRequest};
-use barme_engine::{Engine, EngineError};
+use barme_engine::{Engine, EngineError, PartMeta};
 use futures_util::{StreamExt, TryStreamExt};
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
 /// S3 clients expect a Content-Type on every write; use this when they omit one.
 const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
+
+/// Cap on the CompleteMultipartUpload request body. It only carries a part list;
+/// 10k parts at ~120 bytes each is ~1.2 MiB, so 16 MiB is comfortable headroom.
+const MAX_COMPLETE_BODY: usize = 16 * 1024 * 1024;
 
 /// Anything the engine hands back becomes a status + message. Not-found is
 /// modelled as an `Option` on the read paths, so it never reaches here.
@@ -36,6 +42,8 @@ enum S3Error {
     Engine(EngineError),
     /// The upload's blocking task failed to run (panic or cancellation).
     Internal(String),
+    /// Malformed client input the engine never saw (a bad query parameter).
+    BadRequest(String),
 }
 
 impl From<EngineError> for S3Error {
@@ -56,9 +64,13 @@ impl IntoResponse for S3Error {
             S3Error::Engine(e @ EngineError::Upload(..)) => {
                 (StatusCode::BAD_REQUEST, e.to_string())
             }
+            S3Error::Engine(e @ EngineError::NoSuchUpload(..)) => {
+                (StatusCode::NOT_FOUND, e.to_string())
+            }
             S3Error::Engine(e) if e.is_bad_input() => (StatusCode::BAD_REQUEST, e.to_string()),
             S3Error::Engine(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
             S3Error::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
+            S3Error::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
         };
         (status, msg).into_response()
     }
@@ -79,6 +91,7 @@ pub fn app(state: S3State) -> Router {
     Router::new()
         .route("/{bucket}/{*key}", put(put_object))
         .route("/{bucket}/{*key}", get(get_object))
+        .route("/{bucket}/{*key}", post(post_object))
         .route("/{bucket}/{*key}", delete(delete_object))
         // HEAD shares the GET route in axum; register it explicitly for clarity.
         .route("/{bucket}/{*key}", axum::routing::head(head_object))
@@ -144,12 +157,20 @@ async fn authenticate(State(st): State<S3State>, req: Request, next: Next) -> Re
     next.run(req).await
 }
 
+/// PUT is either a whole-object write or one part of a multipart upload, told
+/// apart by the `uploadId` + `partNumber` query parameters.
 async fn put_object(
     State(st): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    let params = parse_query(query.as_deref());
+    if let (Some(upload_id), Some(pn)) = (params.get("uploadId"), params.get("partNumber")) {
+        return upload_part(&st, upload_id, pn, body).await;
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -175,10 +196,98 @@ async fn put_object(
     Ok((StatusCode::OK, out).into_response())
 }
 
+/// Stream one part of a multipart upload into the store and return its ETag.
+async fn upload_part(
+    st: &S3State,
+    upload_id: &str,
+    part_number: &str,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let part_number: u32 = part_number
+        .parse()
+        .map_err(|_| S3Error::BadRequest("partNumber must be a positive integer".into()))?;
+
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
+    let sync_reader = SyncIoBridge::new(StreamReader::new(stream));
+    let engine = st.engine.clone();
+    let max = st.max_upload_bytes as u64;
+    let uid = upload_id.to_string();
+    let meta = tokio::task::spawn_blocking(move || {
+        engine.upload_part(&uid, part_number, sync_reader, max)
+    })
+    .await
+    .map_err(|e| S3Error::Internal(e.to_string()))??;
+
+    let mut out = HeaderMap::new();
+    out.insert(header::ETAG, etag(&meta.etag));
+    Ok((StatusCode::OK, out).into_response())
+}
+
+/// POST drives the multipart lifecycle: `?uploads` creates an upload, `?uploadId`
+/// completes one.
+async fn post_object(
+    State(st): State<S3State>,
+    Path((bucket, key)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, S3Error> {
+    let params = parse_query(query.as_deref());
+
+    if params.contains_key("uploads") {
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(DEFAULT_CONTENT_TYPE)
+            .to_string();
+        let engine = st.engine.clone();
+        let (b, k) = (bucket.clone(), key.clone());
+        let upload_id = tokio::task::spawn_blocking(move || {
+            engine.create_multipart(&b, &k, &content_type)
+        })
+        .await
+        .map_err(|e| S3Error::Internal(e.to_string()))??;
+        return Ok(xml_response(initiate_xml(&bucket, &key, &upload_id)));
+    }
+
+    if let Some(upload_id) = params.get("uploadId") {
+        // The body lists the parts the client wants stitched, in order.
+        let bytes = axum::body::to_bytes(body, MAX_COMPLETE_BODY)
+            .await
+            .map_err(|e| S3Error::BadRequest(format!("reading complete body: {e}")))?;
+        let order = parse_complete_parts(&bytes);
+        let engine = st.engine.clone();
+        let uid = upload_id.clone();
+        let object_id = tokio::task::spawn_blocking(move || {
+            engine.complete_multipart(&uid, &order)
+        })
+        .await
+        .map_err(|e| S3Error::Internal(e.to_string()))??;
+        return Ok(xml_response(complete_xml(&bucket, &key, &object_id.to_string())));
+    }
+
+    Ok(StatusCode::NOT_IMPLEMENTED.into_response())
+}
+
+/// GET is either an object read or, with `?uploadId`, a ListParts.
 async fn get_object(
     State(st): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, S3Error> {
+    let params = parse_query(query.as_deref());
+    if let Some(upload_id) = params.get("uploadId") {
+        let engine = st.engine.clone();
+        let uid = upload_id.clone();
+        let listed = tokio::task::spawn_blocking(move || engine.list_parts(&uid))
+            .await
+            .map_err(|e| S3Error::Internal(e.to_string()))??;
+        return Ok(match listed {
+            Some(l) => xml_response(list_parts_xml(&l.bucket, &l.key, upload_id, &l.parts)),
+            None => StatusCode::NOT_FOUND.into_response(),
+        });
+    }
+
     let Some((content_type, size, codec, chunks)) = st.engine.object_head(&bucket, &key)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
@@ -230,11 +339,23 @@ async fn head_object(
     Ok((StatusCode::OK, out).into_response())
 }
 
+/// DELETE is either an object delete or, with `?uploadId`, an AbortMultipartUpload.
 async fn delete_object(
-    State(S3State { engine, .. }): State<S3State>,
+    State(st): State<S3State>,
     Path((bucket, key)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, S3Error> {
-    engine.delete(&bucket, &key)?;
+    let params = parse_query(query.as_deref());
+    if let Some(upload_id) = params.get("uploadId") {
+        let engine = st.engine.clone();
+        let uid = upload_id.clone();
+        tokio::task::spawn_blocking(move || engine.abort_multipart(&uid))
+            .await
+            .map_err(|e| S3Error::Internal(e.to_string()))??;
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    st.engine.delete(&bucket, &key)?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -242,6 +363,111 @@ async fn delete_object(
 fn etag(object_id: &str) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{object_id}\""))
         .unwrap_or(HeaderValue::from_static("\"\""))
+}
+
+// ---- query parsing ----
+
+/// Parse a raw query string into a map. A parameter with no `=` (like `uploads`)
+/// maps to an empty string, which is enough to test for its presence.
+fn parse_query(raw: Option<&str>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(raw) = raw else { return map };
+    for pair in raw.split('&').filter(|s| !s.is_empty()) {
+        match pair.split_once('=') {
+            Some((k, v)) => {
+                map.insert(k.to_string(), v.to_string());
+            }
+            None => {
+                map.insert(pair.to_string(), String::new());
+            }
+        }
+    }
+    map
+}
+
+/// Pull the `<PartNumber>` values out of a CompleteMultipartUpload body, in the
+/// order they appear. A tiny hand parser: the body is small and its shape fixed,
+/// so this avoids an XML dependency. An empty result tells the engine to fall
+/// back to every staged part in ascending order.
+fn parse_complete_parts(body: &[u8]) -> Vec<u32> {
+    const OPEN: &str = "<PartNumber>";
+    const CLOSE: &str = "</PartNumber>";
+    let text = String::from_utf8_lossy(body);
+    let mut rest = text.as_ref();
+    let mut out = Vec::new();
+    while let Some(start) = rest.find(OPEN) {
+        rest = &rest[start + OPEN.len()..];
+        let Some(end) = rest.find(CLOSE) else { break };
+        if let Ok(n) = rest[..end].trim().parse::<u32>() {
+            out.push(n);
+        }
+        rest = &rest[end + CLOSE.len()..];
+    }
+    out
+}
+
+// ---- XML responses ----
+
+const XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+
+fn xml_response(body: String) -> Response {
+    let mut h = HeaderMap::new();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml"),
+    );
+    (StatusCode::OK, h, body).into_response()
+}
+
+/// Escape the XML text hazards. Pot names and keys can contain `&`, `<`, `>`.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn initiate_xml(bucket: &str, key: &str, upload_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <InitiateMultipartUploadResult xmlns=\"{XMLNS}\">\
+         <Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId>\
+         </InitiateMultipartUploadResult>",
+        xml_escape(bucket),
+        xml_escape(key),
+        xml_escape(upload_id),
+    )
+}
+
+fn complete_xml(bucket: &str, key: &str, object_id: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <CompleteMultipartUploadResult xmlns=\"{XMLNS}\">\
+         <Bucket>{}</Bucket><Key>{}</Key><ETag>\"{}\"</ETag>\
+         </CompleteMultipartUploadResult>",
+        xml_escape(bucket),
+        xml_escape(key),
+        xml_escape(object_id),
+    )
+}
+
+fn list_parts_xml(bucket: &str, key: &str, upload_id: &str, parts: &[(u32, PartMeta)]) -> String {
+    let mut body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListPartsResult xmlns=\"{XMLNS}\">\
+         <Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId>",
+        xml_escape(bucket),
+        xml_escape(key),
+        xml_escape(upload_id),
+    );
+    for (n, meta) in parts {
+        body.push_str(&format!(
+            "<Part><PartNumber>{n}</PartNumber><ETag>\"{}\"</ETag><Size>{}</Size></Part>",
+            xml_escape(&meta.etag),
+            meta.size,
+        ));
+    }
+    body.push_str("</ListPartsResult>");
+    body
 }
 
 #[cfg(test)]
@@ -262,6 +488,13 @@ mod tests {
             engine: Arc::new(Engine::open(path, barme_engine::Policy::default()).unwrap()),
             max_upload_bytes: 512 * 1024 * 1024,
         }
+    }
+
+    /// Extract the text between two markers, for reading ids out of XML in tests.
+    fn between(haystack: &str, open: &str, close: &str) -> String {
+        let start = haystack.find(open).expect("open marker") + open.len();
+        let end = haystack[start..].find(close).expect("close marker");
+        haystack[start..start + end].to_string()
     }
 
     #[tokio::test]
@@ -389,6 +622,99 @@ mod tests {
                     .method("GET")
                     .uri("/photos/gone.txt")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn multipart_round_trips() {
+        let app = app(state());
+
+        // Initiate.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/vids/clip.bin?uploads")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let xml = res.into_body().collect().await.unwrap().to_bytes();
+        let xml = String::from_utf8_lossy(&xml);
+        let upload_id = between(&xml, "<UploadId>", "</UploadId>");
+
+        // Two parts, large enough that each spans several chunks.
+        let p1 = vec![b'a'; 200_000];
+        let p2 = vec![b'b'; 90_000];
+        for (n, data) in [(1u32, &p1), (2u32, &p2)] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/vids/clip.bin?partNumber={n}&uploadId={upload_id}"))
+                        .body(Body::from(data.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert!(res.headers().contains_key(header::ETAG));
+        }
+
+        // Complete, naming both parts in order.
+        let complete = "<CompleteMultipartUpload>\
+             <Part><PartNumber>1</PartNumber></Part>\
+             <Part><PartNumber>2</PartNumber></Part>\
+             </CompleteMultipartUpload>";
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/vids/clip.bin?uploadId={upload_id}"))
+                    .body(Body::from(complete))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // The object reads back as the two parts concatenated.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/vids/clip.bin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let got = res.into_body().collect().await.unwrap().to_bytes();
+        let mut expected = p1.clone();
+        expected.extend_from_slice(&p2);
+        assert_eq!(got.len(), expected.len());
+        assert_eq!(&got[..], &expected[..]);
+    }
+
+    #[tokio::test]
+    async fn upload_part_to_unknown_id_is_404() {
+        let app = app(state());
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/vids/clip.bin?partNumber=1&uploadId=deadbeef")
+                    .body(Body::from(vec![0u8; 10]))
                     .unwrap(),
             )
             .await
