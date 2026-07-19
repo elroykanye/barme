@@ -26,18 +26,38 @@ use barme_engine::Engine;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-pub fn app(engine: Arc<Engine>) -> Router {
+pub fn app(engine: Arc<Engine>, cors_origins: &[String]) -> Router {
     Router::new()
         .route("/cdn/{hash}", get(by_hash))
         .route("/public/{bucket}/{*key}", get(by_key))
         .route("/s/{bucket}/{*key}", get(by_presign))
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .with_state(engine)
 }
 
-pub async fn serve(engine: Arc<Engine>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
-    axum::serve(listener, app(engine)).await
+/// CORS for the delivery door. `["*"]` (the default) stays permissive; a specific
+/// list restricts `Access-Control-Allow-Origin` to those origins. An entry that
+/// isn't a valid origin is dropped; an empty result allows no cross-origin call.
+fn cors_layer(origins: &[String]) -> CorsLayer {
+    use tower_http::cors::Any;
+    if origins.iter().any(|o| o == "*") {
+        CorsLayer::permissive()
+    } else {
+        let list: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(list)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
+}
+
+pub async fn serve(
+    engine: Arc<Engine>,
+    cors_origins: Vec<String>,
+    listener: tokio::net::TcpListener,
+) -> std::io::Result<()> {
+    axum::serve(listener, app(engine, &cors_origins)).await
 }
 
 /// Immutable delivery by content hash. Anyone holding the hash may fetch it.
@@ -254,5 +274,81 @@ mod tests {
         assert!(!if_none_match(&h, "\"xyz\""));
         h.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
         assert!(if_none_match(&h, "\"anything\""));
+    }
+
+    // --- presigned share links, end to end through the delivery door ---
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use barme_core::KeyRecord;
+    use barme_engine::{Engine, Policy};
+    use tower::ServiceExt;
+
+    const FUTURE: u64 = 4_102_444_800; // year 2100, comfortably unexpired
+    const PAST: u64 = 1; // 1970, long expired
+
+    /// An engine with one owner key (so a signing secret exists) and a private
+    /// object. Returns the signing secret the door will verify against.
+    fn engine_with_private_object() -> (tempfile::TempDir, Arc<Engine>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::open(dir.path(), Policy::default()).unwrap();
+        engine
+            .create_key(&KeyRecord {
+                access_key: "owner".into(),
+                secret_key: "shh-signing-secret".into(),
+                read_only: false,
+                pots: vec![],
+                created_at: String::new(),
+            })
+            .unwrap();
+        // Private pot (no public_read): only a valid presign should serve it.
+        engine
+            .put("private", "doc.txt", b"time-limited bytes", "text/plain")
+            .unwrap();
+        let secret = engine.signing_secret().unwrap();
+        (dir, Arc::new(engine), secret)
+    }
+
+    async fn share_status(engine: Arc<Engine>, uri: &str) -> StatusCode {
+        app(engine, &["*".to_string()])
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn valid_presign_serves_a_private_object() {
+        let (_d, engine, secret) = engine_with_private_object();
+        let sig = barme_auth::presign(&secret, "private", "doc.txt", FUTURE);
+        let uri = format!("/s/private/doc.txt?exp={FUTURE}&sig={sig}");
+        assert_eq!(share_status(engine, &uri).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn expired_presign_is_forbidden() {
+        let (_d, engine, secret) = engine_with_private_object();
+        // Correctly signed, but for an expiry in the past.
+        let sig = barme_auth::presign(&secret, "private", "doc.txt", PAST);
+        let uri = format!("/s/private/doc.txt?exp={PAST}&sig={sig}");
+        assert_eq!(share_status(engine, &uri).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn tampered_signature_is_forbidden() {
+        let (_d, engine, _secret) = engine_with_private_object();
+        let uri = format!("/s/private/doc.txt?exp={FUTURE}&sig={}", "0".repeat(64));
+        assert_eq!(share_status(engine, &uri).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_signature_does_not_transfer_to_another_key() {
+        // The signature binds the path, so a link minted for one object must not
+        // unlock a different one under the same expiry.
+        let (_d, engine, secret) = engine_with_private_object();
+        engine.put("private", "other.txt", b"not shared", "text/plain").unwrap();
+        let sig = barme_auth::presign(&secret, "private", "doc.txt", FUTURE); // for doc.txt
+        let uri = format!("/s/private/other.txt?exp={FUTURE}&sig={sig}"); // used on other.txt
+        assert_eq!(share_status(engine, &uri).await, StatusCode::FORBIDDEN);
     }
 }

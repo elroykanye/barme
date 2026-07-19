@@ -39,6 +39,9 @@ pub struct AppState {
     pub cdn_base: String,
     /// Largest accepted upload body, in bytes. Enforced by the router.
     pub max_upload_bytes: usize,
+    /// Allowed browser CORS origins. `["*"]` (the default) allows any; a specific
+    /// list restricts the doors to those origins.
+    pub cors_origins: Vec<String>,
     /// When the process came up, for the health uptime reading.
     pub started: Instant,
 }
@@ -96,8 +99,28 @@ impl IntoResponse for NativeError {
     }
 }
 
+/// Build a CORS layer from configured origins. `["*"]` (or any entry of `*`)
+/// stays permissive — the open default for local use. A specific list restricts
+/// `Access-Control-Allow-Origin` to exactly those origins, so a deployment can
+/// stop arbitrary sites from scripting the API from a victim's browser. An entry
+/// that isn't a valid origin is dropped; if that empties the list, no
+/// cross-origin request is allowed (fail closed).
+pub(crate) fn cors_layer(origins: &[String]) -> CorsLayer {
+    use tower_http::cors::Any;
+    if origins.iter().any(|o| o == "*") {
+        CorsLayer::permissive()
+    } else {
+        let list: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(list)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
+}
+
 pub fn app(state: AppState) -> Router {
     let max_upload = state.max_upload_bytes;
+    let cors = cors_layer(&state.cors_origins);
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -144,7 +167,7 @@ pub fn app(state: AppState) -> Router {
         // Cap the upload body: it's buffered in memory, so an unbounded body
         // could OOM the process. Over the limit gets 413 Payload Too Large.
         .layer(axum::extract::DefaultBodyLimit::max(max_upload))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -1149,6 +1172,7 @@ mod tests {
             semantic: None,
             cdn_base: "http://localhost:7375".into(),
             max_upload_bytes: 512 * 1024 * 1024,
+            cors_origins: vec!["*".into()],
             started: Instant::now(),
         }
     }
@@ -1183,6 +1207,67 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cors_restricts_to_configured_origins() {
+        // A restricted list echoes only the allowed origin back; an unlisted one
+        // gets no Access-Control-Allow-Origin, so a browser blocks the read. This
+        // is what makes the cors_origins config knob actually do something.
+        let mut st = state();
+        st.cors_origins = vec!["https://good.example".into()];
+
+        let allowed = send(
+            app(st.clone()),
+            Request::builder()
+                .uri("/pots")
+                .header("origin", "https://good.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            allowed
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://good.example"),
+        );
+
+        let blocked = send(
+            app(st),
+            Request::builder()
+                .uri("/pots")
+                .header("origin", "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            blocked
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "an unlisted origin must not be granted CORS access",
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_star_is_permissive() {
+        // The default ["*"] allows any origin — the open, local-friendly default.
+        let res = send(
+            app(state()),
+            Request::builder()
+                .uri("/pots")
+                .header("origin", "https://anything.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            res.headers().get("access-control-allow-origin").is_some(),
+            "permissive CORS should allow any origin",
+        );
     }
 
     #[tokio::test]

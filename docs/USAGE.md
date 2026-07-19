@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.5.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.5.1
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -85,6 +85,10 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     # flat), so this is a size ceiling, not a memory one. Over it gets 413.
     # Default 512 MiB.
     max_upload_bytes = 536870912
+    # Browser origins allowed to call the API and CDN doors. Default ["*"] allows
+    # any (convenient locally). In production list your console/app origins so
+    # other sites can't script the API from a victim's browser.
+    cors_origins = ["https://console.example.com"]
 
     [credentials]
     access_key = "barme"

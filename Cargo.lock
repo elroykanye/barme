@@ -212,7 +212,9 @@ dependencies = [
  "barme-core",
  "barme-engine",
  "serde",
+ "tempfile",
  "tokio",
+ "tower",
  "tower-http",
 ]
 
@@ -352,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "barmed"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "axum",
  "barme-auth",

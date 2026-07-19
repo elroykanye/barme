@@ -473,12 +473,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         semantic,
         cdn_base: http_base(&config.cdn_addr),
         max_upload_bytes: config.max_upload_bytes,
+        cors_origins: config.cors_origins.clone(),
         started: std::time::Instant::now(),
     };
 
     let s3 = barme_s3::serve(s3_state, s3_listener);
     let native = barme_native::serve(native_state, native_listener);
-    let cdn = barme_cdn::serve(engine.clone(), cdn_listener);
+    let cdn = barme_cdn::serve(engine.clone(), config.cors_origins.clone(), cdn_listener);
 
     #[cfg(feature = "ui")]
     {

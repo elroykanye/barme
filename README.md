@@ -16,7 +16,7 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:0.5.0
+      -v barme:/data elroykanye/barme:0.5.1
 
 Console on http://localhost:7374. On first start barme prints a generated owner
 login (access key `barme`, a random secret) — copy it from the logs, or set your
@@ -100,7 +100,7 @@ search. Config, ports, and the full API are covered in
 
 ## Status
 
-Alpha (v0.5.0). It works end to end, but it's early: uploads and downloads
+Alpha (v0.5.1). It works end to end, but it's early: uploads and downloads
 stream (memory stays flat regardless of object size), an acknowledged write
 survives a hard kill of the process (writes are fsync-durable and the daemon
 recovers on restart), concurrent writes and garbage collection are safe under
