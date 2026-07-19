@@ -52,9 +52,74 @@ pub enum StoreError {
     /// deliberately vague — a decrypt failure shouldn't say why.
     #[error("crypto: {0}")]
     Crypto(String),
+    /// The data directory was written by a newer barme than this build knows.
+    /// Refusing to open is safer than risking a misread of a layout we don't
+    /// understand — the operator should upgrade barme instead.
+    #[error("data directory is on-disk format v{found}, but this build supports up to v{supported}; upgrade barme")]
+    UnsupportedFormat { found: u32, supported: u32 },
+    /// A single object's manifest was written by a newer barme. Reading it could
+    /// misinterpret fields this build doesn't know, so this object is refused
+    /// (the rest of the store still works).
+    #[error("object manifest is v{found}, but this build supports up to v{supported}; upgrade barme")]
+    UnsupportedManifest { found: u32, supported: u32 },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// On-disk layout version, stamped in `format.json` at the data root. Bump this
+/// only on a *breaking* change to how bytes are laid out on disk, and add a
+/// migration arm in [`open_format`] for the step. Additive, backward-compatible
+/// changes (a new optional manifest field, a new store subdir) do not need a
+/// bump — old data still reads. This is the anchor that lets 1.x evolve the
+/// layout without orphaning data written by an earlier 1.x.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Name of the format stamp at the data root. A plain top-level file, beside the
+/// shard subdirs; no walker parses it.
+const FORMAT_FILE: &str = "format.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FormatStamp {
+    format_version: u32,
+}
+
+/// Read, verify, or establish the data dir's format stamp — the migration hook.
+///   - stamp newer than this build   -> refuse (don't risk misreading it)
+///   - stamp older than this build   -> migrate up, then rewrite the stamp
+///   - no stamp (fresh or pre-stamp) -> adopt the current version in place
+/// Returns the resolved version. Runs before any substore opens, so an
+/// unsupported directory is rejected before anything touches it.
+fn open_format(root: &Path) -> Result<u32> {
+    let path = root.join(FORMAT_FILE);
+    let stamp = |v: u32| -> Result<()> {
+        write_atomic(&path, &serde_json::to_vec(&FormatStamp { format_version: v })?)
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let found = serde_json::from_slice::<FormatStamp>(&bytes)?.format_version;
+            if found > FORMAT_VERSION {
+                return Err(StoreError::UnsupportedFormat {
+                    found,
+                    supported: FORMAT_VERSION,
+                });
+            }
+            if found < FORMAT_VERSION {
+                // Future: run each v(found)..FORMAT_VERSION migration in order.
+                // None exist yet — v1 is the first stamped format.
+                stamp(FORMAT_VERSION)?;
+            }
+            Ok(FORMAT_VERSION)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A brand-new dir, or one written before stamping existed. Either
+            // way today's layout *is* v1, so adopt the existing data as v1.
+            std::fs::create_dir_all(root)?;
+            stamp(FORMAT_VERSION)?;
+            Ok(FORMAT_VERSION)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
 
 /// The whole store, rooted at one directory.
 pub struct Store {
@@ -66,6 +131,8 @@ pub struct Store {
     pub annotations: AnnotationStore,
     pub reverse: ReverseStore,
     pub webhooks: WebhookStore,
+    /// Resolved on-disk format version for this data dir (see [`FORMAT_VERSION`]).
+    pub format_version: u32,
     /// Temp files left by a crashed write and reaped on this open. Zero on a
     /// clean start; non-zero means the last run was killed mid-write. The
     /// daemon logs it.
@@ -87,6 +154,9 @@ impl Store {
 
     fn open_inner(root: impl AsRef<Path>, master_key: Option<[u8; 32]>) -> Result<Self> {
         let root = root.as_ref();
+        // Check/establish the on-disk format first, so a directory from a newer
+        // barme is refused before anything reads or writes it.
+        let format_version = open_format(root)?;
         // Reap any temp files a previous crash left behind before anything walks
         // the shard dirs, so a half-written file can't trip an enumerator.
         let recovered_temp = sweep_temp(root)?;
@@ -103,6 +173,7 @@ impl Store {
             annotations: AnnotationStore::open(root.join("annotations"))?,
             reverse: ReverseStore::open(root.join("reverse"))?,
             webhooks: WebhookStore::open(root.join("webhooks"))?,
+            format_version,
             recovered_temp,
         })
     }

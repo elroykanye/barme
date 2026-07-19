@@ -241,6 +241,11 @@ impl Engine {
         self.store.recovered_temp
     }
 
+    /// The on-disk layout version this data directory is stamped with.
+    pub fn format_version(&self) -> u32 {
+        self.store.format_version
+    }
+
     /// Register a hook to run after every successful write. Set it before the
     /// engine is shared. The hook must be cheap and non-blocking; the intended
     /// use is to drop the event on a queue for a background worker.

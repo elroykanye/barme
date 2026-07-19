@@ -328,6 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // generated on first boot.
     let master_key = resolve_master_key(&config.data_dir)?;
     let mut engine = Engine::open_encrypted(&config.data_dir, policy, &master_key)?;
+    tracing::info!("on-disk format v{}", engine.format_version());
     if engine.recovered_temp() > 0 {
         tracing::warn!(
             "recovered from unclean shutdown: reaped {} temp file(s) from interrupted writes",

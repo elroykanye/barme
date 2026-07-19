@@ -7,7 +7,7 @@
 //! manifest is caught exactly like a tampered chunk.
 
 use crate::{shard, write_atomic, Result, StoreError};
-use barme_core::{Hash, Manifest};
+use barme_core::{Hash, Manifest, MANIFEST_VERSION};
 use std::path::{Path, PathBuf};
 
 pub struct ManifestStore {
@@ -43,6 +43,16 @@ impl ManifestStore {
             Err(e) => return Err(e.into()),
         };
         let manifest: Manifest = serde_json::from_slice(&bytes)?;
+        // Refuse a manifest from a newer barme before trusting its fields: a
+        // version past what we know may mean a field changed meaning. Checked
+        // before the integrity match so the message is about the version, not a
+        // hash mismatch.
+        if manifest.manifest_version > MANIFEST_VERSION {
+            return Err(StoreError::UnsupportedManifest {
+                found: manifest.manifest_version,
+                supported: MANIFEST_VERSION,
+            });
+        }
         if manifest_id(&manifest)? != *id {
             return Err(StoreError::Integrity {
                 addr: id.to_string(),
@@ -137,5 +147,21 @@ mod tests {
         tampered.tenant = "attacker".into(); // ...but change the content
         std::fs::write(shard(&s.root, &id), serde_json::to_vec(&tampered).unwrap()).unwrap();
         assert!(matches!(s.get(&id), Err(StoreError::Integrity { .. })));
+    }
+
+    #[test]
+    fn manifest_from_a_newer_barme_is_refused() {
+        let (_d, s) = store();
+        // A manifest stamped with a version this build doesn't know. put()
+        // addresses it by its own (v2-inclusive) content, so the id matches on
+        // read; the version guard must reject it before that.
+        let mut future = sample();
+        future.manifest_version = MANIFEST_VERSION + 1;
+        let id = s.put(&future).unwrap();
+        assert!(matches!(
+            s.get(&id),
+            Err(StoreError::UnsupportedManifest { found, supported })
+                if found == MANIFEST_VERSION + 1 && supported == MANIFEST_VERSION
+        ));
     }
 }
