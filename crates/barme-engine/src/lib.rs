@@ -410,6 +410,12 @@ impl Engine {
         };
         let codec = build_codec(&codec_name, level)?;
 
+        // Pin each chunk as it lands through a guard, so any early return in this
+        // loop — a client disconnect (`Upload`), an encode/store error, or the
+        // size cap — releases the pins instead of leaking them. On success the
+        // pins are handed to the staged upload (`disarm`), which unpins them at
+        // complete/abort.
+        let mut pins = PinGuard::new(&self.store.chunks);
         let mut chunks = Vec::new();
         let mut stored_size = 0u64;
         let mut orig_size = 0u64;
@@ -418,15 +424,13 @@ impl Engine {
             let (_raw_hash, data) = item.map_err(EngineError::Upload)?;
             orig_size += data.len() as u64;
             if orig_size > max_bytes {
-                // Unpin what we stored before bailing; those chunks are orphans now.
-                self.store.chunks.unpin(&chunks);
                 return Err(EngineError::TooLarge { limit: max_bytes });
             }
             hasher.update(&data);
             let encoded = codec.encode(&data)?;
             stored_size += encoded.len() as u64;
             let h = self.store.chunks.put(&encoded)?;
-            self.store.chunks.pin(&h);
+            pins.pin(h);
             chunks.push(h);
         }
         let etag = hex::encode(hasher.finalize());
@@ -439,11 +443,13 @@ impl Engine {
                     part_number,
                     StagedPart { chunks, stored_size, orig_size, etag: etag.clone() },
                 );
+                // The staged upload owns the pins now; don't unpin on drop.
+                pins.disarm();
                 Ok(PartMeta { etag, size: orig_size })
             }
             None => {
-                // Aborted out from under us mid-part; don't leak the pins.
-                self.store.chunks.unpin(&chunks);
+                // Aborted out from under us mid-part; `pins` drops here and
+                // unpins, so the orphaned chunks are reclaimable.
                 Err(EngineError::NoSuchUpload(upload_id.to_string()))
             }
         }
@@ -457,12 +463,22 @@ impl Engine {
     pub fn complete_multipart(&self, upload_id: &str, order: &[u32]) -> Result<Hash> {
         // Take the upload out up front so a second concurrent complete can't
         // double-commit. On any error we don't reinsert; the client retries fresh.
-        let staged = self
+        let mut staged = self
             .multipart
             .lock()
             .unwrap()
             .remove(upload_id)
             .ok_or_else(|| EngineError::NoSuchUpload(upload_id.to_string()))?;
+
+        // Release the in-flight pins on every exit from here on. On success the
+        // chunks are reachable through the new pointer; on any failure below
+        // (bad part number, missing chunk, decode/commit error) they're orphans.
+        // Either way the pins must come off — a bare `?` return must not leak
+        // them, and the upload is already out of the map so it can't be aborted.
+        let _release = ReleasePins {
+            chunks: &self.store.chunks,
+            hashes: std::mem::take(&mut staged.pinned),
+        };
 
         let order: Vec<u32> = if order.is_empty() {
             staged.parts.keys().copied().collect()
@@ -513,8 +529,8 @@ impl Engine {
             )?
         };
 
-        // The chunks are reachable through the pointer now; drop the in-flight pins.
-        self.store.chunks.unpin(&staged.pinned);
+        // `_release` drops at end of scope and unpins the staged chunks — now
+        // reachable through the pointer, so unpinning is safe.
 
         if let Some(hook) = &self.write_hook {
             hook(WriteEvent {
@@ -554,6 +570,14 @@ impl Engine {
             key: up.key.clone(),
             parts,
         }))
+    }
+
+    /// How many chunks are currently pinned as in-flight — uncommitted single
+    /// writes plus staged multipart parts. It returns to zero once nothing is
+    /// mid-upload, so a non-zero count with no active upload is a pin leak. Used
+    /// by tests and available for ops introspection.
+    pub fn pinned_chunk_count(&self) -> usize {
+        self.store.chunks.pinned().len()
     }
 
     /// The pot's effective storage policy: its own overrides where set, the
@@ -1187,12 +1211,14 @@ struct EffectivePolicy {
 
 /// Public metadata for one uploaded part: its ETag (hex SHA-256 of the part's
 /// original bytes) and original size in bytes.
+#[derive(Debug, Clone)]
 pub struct PartMeta {
     pub etag: String,
     pub size: u64,
 }
 
 /// What [`Engine::list_parts`] returns: the target pot/key and the staged parts.
+#[derive(Debug, Clone)]
 pub struct MultipartListing {
     pub bucket: String,
     pub key: String,
@@ -1242,11 +1268,35 @@ impl<'a> PinGuard<'a> {
         self.chunks.pin(&hash);
         self.pinned.push(hash);
     }
+
+    /// Hand the pins off to a longer-lived owner (a staged multipart upload):
+    /// the chunks stay pinned and this guard's `Drop` becomes a no-op. Call only
+    /// once the hashes are recorded somewhere that will unpin them later.
+    fn disarm(&mut self) {
+        self.pinned.clear();
+    }
 }
 
 impl Drop for PinGuard<'_> {
     fn drop(&mut self) {
         self.chunks.unpin(&self.pinned);
+    }
+}
+
+/// Releases a fixed set of in-flight chunk pins on drop — on *every* exit,
+/// including an early `?` return or a panic. `complete_multipart` uses it: once
+/// an upload is pulled out of the map its chunks are either about to become
+/// reachable through the new pointer (success) or orphans (any failure), so the
+/// in-flight pins must come off either way. Without it, a failed complete would
+/// strand every pinned chunk — a client-triggerable leak.
+struct ReleasePins<'a> {
+    chunks: &'a barme_store::ChunkStore,
+    hashes: Vec<Hash>,
+}
+
+impl Drop for ReleasePins<'_> {
+    fn drop(&mut self) {
+        self.chunks.unpin(&self.hashes);
     }
 }
 
