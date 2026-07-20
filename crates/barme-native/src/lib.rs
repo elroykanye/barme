@@ -123,6 +123,7 @@ pub fn app(state: AppState) -> Router {
     let cors = cors_layer(&state.cors_origins);
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/metrics", get(metrics))
         .route("/stats", get(stats))
         .route("/keys", get(list_keys).post(create_key))
@@ -909,6 +910,21 @@ async fn health(State(st): State<AppState>) -> Result<Response, NativeError> {
     .into_response())
 }
 
+/// Readiness, distinct from liveness: can the store actually be read right now?
+/// A cheap probe (lists the key store — a small directory read) that returns 503
+/// if the data dir is unreadable, so an orchestrator pulls the node out of
+/// rotation instead of sending it traffic it can't serve. No auth.
+async fn ready(State(st): State<AppState>) -> Response {
+    match st.engine.list_keys() {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({ "ready": true }))).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ready": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 /// Minimal Prometheus text exposition. Formatted by hand; no client dep.
 async fn metrics(
     State(st): State<AppState>,
@@ -916,6 +932,7 @@ async fn metrics(
 ) -> Result<Response, NativeError> {
     caller(&st, &headers).require_owner()?;
     let s = st.engine.stats()?;
+    let g = st.engine.gc_stats();
     let body = format!(
         "# HELP barme_objects Number of live objects.\n\
          # TYPE barme_objects gauge\n\
@@ -926,10 +943,33 @@ async fn metrics(
          # HELP barme_unique_chunks Number of unique stored chunks.\n\
          # TYPE barme_unique_chunks gauge\n\
          barme_unique_chunks {}\n\
+         # HELP barme_logical_bytes Sum of current object sizes (pre-dedup).\n\
+         # TYPE barme_logical_bytes gauge\n\
+         barme_logical_bytes {}\n\
          # HELP barme_physical_bytes Deduplicated, compressed bytes on disk.\n\
          # TYPE barme_physical_bytes gauge\n\
-         barme_physical_bytes {}\n",
-        s.objects, s.buckets, s.unique_chunks, s.physical_bytes
+         barme_physical_bytes {}\n\
+         # HELP barme_gc_sweeps_total GC sweeps run since start.\n\
+         # TYPE barme_gc_sweeps_total counter\n\
+         barme_gc_sweeps_total {}\n\
+         # HELP barme_gc_condemned_total Chunks condemned since start.\n\
+         # TYPE barme_gc_condemned_total counter\n\
+         barme_gc_condemned_total {}\n\
+         # HELP barme_gc_erased_total Chunks erased (reclaimed) since start.\n\
+         # TYPE barme_gc_erased_total counter\n\
+         barme_gc_erased_total {}\n\
+         # HELP barme_gc_last_live Reachable chunks seen by the last sweep.\n\
+         # TYPE barme_gc_last_live gauge\n\
+         barme_gc_last_live {}\n",
+        s.objects,
+        s.buckets,
+        s.unique_chunks,
+        s.logical_bytes,
+        s.physical_bytes,
+        g.sweeps,
+        g.condemned_total,
+        g.erased_total,
+        g.last_live,
     );
     let mut out = HeaderMap::new();
     out.insert(
@@ -1209,6 +1249,38 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ready_reports_ready_when_store_is_readable() {
+        let res = send(
+            app(state()),
+            Request::builder().uri("/ready").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("\"ready\":true"));
+    }
+
+    #[tokio::test]
+    async fn metrics_include_gc_counters() {
+        // Open mode -> the caller is treated as owner, so require_owner passes.
+        let res = send(
+            app(state()),
+            Request::builder().uri("/metrics").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        for m in [
+            "barme_gc_sweeps_total",
+            "barme_gc_erased_total",
+            "barme_logical_bytes",
+        ] {
+            assert!(text.contains(m), "metrics missing {m}");
+        }
     }
 
     #[tokio::test]

@@ -3,9 +3,9 @@ name: barme
 description: A content-addressed object store that speaks S3
 type: application
 # Chart version. Bump on chart changes independently of the app.
-version: 0.1.0
+version: 0.2.0
 # Default barme image version the chart ships. Overridable with image.tag.
-appVersion: "0.7.0"
+appVersion: "0.9.0"
 home: https://github.com/elroykanye/barme
 sources:
   - https://github.com/elroykanye/barme

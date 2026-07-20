@@ -122,6 +122,13 @@ verify_ledger() {
     if [[ "$got" != "$sha" ]]; then
       echo "  CORRUPT after crash: $key (want $sha got $got)"; fail=$((fail + 1))
     fi
+    # Cross-check with the server's own /verify, which re-reads and re-hashes the
+    # object against its manifest. Recovery (download+rehash above) and the
+    # server's integrity check must agree.
+    local vr; vr="$(curl -sf -u "$AUTH" -X POST "$BASE/verify/$POT/$key" 2>/dev/null)"
+    if [[ "$vr" != *'"ok":true'* ]]; then
+      echo "  VERIFY MISMATCH after crash: $key (/verify said: ${vr:-<no response>})"; fail=$((fail + 1))
+    fi
   done <"$LEDGER"
   echo "  verified $total acknowledged object(s), $fail bad"
   return $fail

@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.8.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.9.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -147,6 +147,57 @@ barme replicates an object by transferring only the chunks the far side doesn't 
 Prove a specific chunk belongs to an object, without shipping the whole object:
 
     curl -u barme:barme "http://localhost:7373/proof/photos/cat.jpg?index=0"
+
+## Observability
+
+Probe and telemetry endpoints on the native door (7373):
+
+- `GET /health` — liveness plus headline counts (objects, pots, chunks, uptime).
+  No auth, safe for a probe.
+- `GET /ready` — readiness: 200 when the store is readable, 503 if the data dir
+  can't be read. No auth. Point a Kubernetes readiness probe here, liveness at
+  `/health`.
+- `GET /metrics` — Prometheus text, **owner-authed**: object/pot/chunk counts,
+  logical vs physical bytes, and GC counters (sweeps, condemned, erased, live).
+
+Logs go to stderr, filtered by `RUST_LOG` (default `info`). Request logging is
+structured — each request carries `method`, `uri`, `status`, and `latency` — and
+lives at debug on the HTTP trace layer, off by default so health probes don't
+spam the log. Turn it on with:
+
+    RUST_LOG=info,tower_http::trace=debug barmed
+
+## Backup and restore
+
+The data directory is a self-contained, coherent backup target. Everything barme
+needs lives under it — chunks, manifests, version pointers, per-pot config, keys,
+the format stamp, and (unless you set `BARME_MASTER_KEY`) the `master.key`. Writes
+are atomic and fsync-durable, so once a write is acknowledged it survives in that
+directory.
+
+**Back up** the whole directory as one unit. For a consistent point-in-time copy,
+either stop `barmed` first or take a filesystem/volume snapshot (an atomic
+snapshot, or a copy of a stopped instance, captures a coherent set; a plain `cp`
+of a *live* directory can catch a write mid-flight):
+
+    # stopped instance, or a snapshot mount:
+    tar czf barme-backup-$(date +%F).tgz -C /path/to data
+
+**Restore** by putting the directory back and pointing barme at it. On open it
+re-adopts the format stamp and reaps any temp files a crash left behind:
+
+    tar xzf barme-backup-2026-07-20.tgz -C /path/to
+    BARME_DATA_DIR=/path/to/data barmed
+
+**The master key is the one thing that can live outside the backup.** If you run
+with `BARME_MASTER_KEY` in the environment (recommended for production), the data
+dir holds only *encrypted* secrets — so **back the master key up separately**, or
+a restored copy can't decrypt its own keys. If instead you rely on the in-dir
+`master.key`, it travels with the backup (self-contained, but the backup then
+contains the key that decrypts its secrets — protect it accordingly).
+
+A copied data dir opening clean and returning every object byte-for-byte is
+covered by a test (`crates/barme-engine/tests/backup.rs`).
 
 ## Next
 

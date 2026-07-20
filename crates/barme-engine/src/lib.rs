@@ -121,6 +121,20 @@ pub struct Stats {
     pub unique_chunks: usize,
 }
 
+/// Cumulative garbage-collection counters since process start. See
+/// [`Engine::gc_stats`]. Counters reset on restart.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct GcStats {
+    /// Sweeps run.
+    pub sweeps: u64,
+    /// Chunks condemned (stamped unreachable), summed over all sweeps.
+    pub condemned_total: u64,
+    /// Chunks erased (reclaimed after the grace window), summed over all sweeps.
+    pub erased_total: u64,
+    /// Reachable chunks seen by the most recent sweep.
+    pub last_live: u64,
+}
+
 /// The result of comparing two object versions by their chunk sets.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Diff {
@@ -186,6 +200,12 @@ pub struct Engine {
     /// Mixed into new upload ids so two uploads to the same key in the same
     /// second still get distinct ids.
     mp_counter: AtomicU64,
+    /// Cumulative GC counters, updated on each [`Engine::gc_sweep`] for
+    /// `/metrics`. Reset to zero on restart (metrics scrapers handle that).
+    gc_sweeps: AtomicU64,
+    gc_condemned_total: AtomicU64,
+    gc_erased_total: AtomicU64,
+    gc_last_live: AtomicU64,
 }
 
 impl Engine {
@@ -197,6 +217,10 @@ impl Engine {
             key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
             multipart: Mutex::new(HashMap::new()),
             mp_counter: AtomicU64::new(0),
+            gc_sweeps: AtomicU64::new(0),
+            gc_condemned_total: AtomicU64::new(0),
+            gc_erased_total: AtomicU64::new(0),
+            gc_last_live: AtomicU64::new(0),
         })
     }
 
@@ -215,6 +239,10 @@ impl Engine {
             key_locks: (0..KEY_LOCK_SHARDS).map(|_| Mutex::new(())).collect(),
             multipart: Mutex::new(HashMap::new()),
             mp_counter: AtomicU64::new(0),
+            gc_sweeps: AtomicU64::new(0),
+            gc_condemned_total: AtomicU64::new(0),
+            gc_erased_total: AtomicU64::new(0),
+            gc_last_live: AtomicU64::new(0),
         })
     }
 
@@ -932,7 +960,24 @@ impl Engine {
     /// owns the clock; `grace` is how long a chunk stays condemned before it's
     /// erased. Returns what the pass did.
     pub fn gc_sweep(&self, now_secs: u64, grace: std::time::Duration) -> Result<barme_gc::Sweep> {
-        Ok(barme_gc::Gc::new(&self.store, grace).sweep(now_secs)?)
+        let s = barme_gc::Gc::new(&self.store, grace).sweep(now_secs)?;
+        self.gc_sweeps.fetch_add(1, Ordering::Relaxed);
+        self.gc_condemned_total
+            .fetch_add(s.condemned as u64, Ordering::Relaxed);
+        self.gc_erased_total
+            .fetch_add(s.erased as u64, Ordering::Relaxed);
+        self.gc_last_live.store(s.live as u64, Ordering::Relaxed);
+        Ok(s)
+    }
+
+    /// Cumulative GC counters since process start, for `/metrics`.
+    pub fn gc_stats(&self) -> GcStats {
+        GcStats {
+            sweeps: self.gc_sweeps.load(Ordering::Relaxed),
+            condemned_total: self.gc_condemned_total.load(Ordering::Relaxed),
+            erased_total: self.gc_erased_total.load(Ordering::Relaxed),
+            last_live: self.gc_last_live.load(Ordering::Relaxed),
+        }
     }
 
     /// Storage-wide statistics. `logical_bytes` is what users think they stored
