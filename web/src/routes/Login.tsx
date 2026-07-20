@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Logo } from "@/components/ui/logo";
 import { ApiError } from "@/lib/api";
 
 export function Login() {
@@ -35,7 +36,7 @@ export function Login() {
         className="w-full max-w-sm rounded-xl border border-border bg-panel p-7 shadow-2xl shadow-black/40"
       >
         <div className="mb-6 flex items-center gap-2.5">
-          <span className="size-2.5 rounded-full bg-gradient-to-br from-accent to-fuchsia-400 shadow-[0_0_0_3px] shadow-accent/20" />
+          <Logo className="size-7" />
           <span className="text-base font-semibold tracking-tight">barme</span>
         </div>
 

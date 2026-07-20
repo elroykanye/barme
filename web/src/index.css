@@ -1,34 +1,43 @@
 @import "tailwindcss";
 
-/* Dark dev-tool palette. These become utilities: bg-panel, text-muted, etc. */
+/* barme brand palette — shared with the marketing site (site/styles.css). The
+   accent is the "pot" orange; neutrals are the site's dark scale. These become
+   Tailwind utilities: bg-panel, text-muted, text-accent, etc. Dark is the base;
+   the light block below overrides when the root opts in. */
 @theme {
-  --color-bg: #0b0d11;
-  --color-panel: #101318;
-  --color-elevated: #161a21;
-  --color-border: #232a33;
-  --color-text: #e6e9ef;
-  --color-muted: #8b93a1;
-  --color-faint: #5b6472;
-  --color-accent: #7c6cff;
-  --color-accent-ink: #ffffff;
+  --color-bg: #0c0e11;
+  --color-panel: #121519;
+  --color-elevated: #15181d;
+  --color-border: #23272e;
+  --color-text: #e8eaed;
+  --color-muted: #a1a7b0;
+  --color-faint: #6b727c;
+  --color-accent: #f0954a;
+  --color-accent-strong: #ffab5e;
+  --color-accent-ink: #1a1205;
   --color-ok: #43d17a;
   --color-warn: #f2b34b;
   --color-danger: #f16d6d;
 
-  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
-/* Light theme: overrides the dark tokens above when the root opts in. */
+/* Light theme: overrides the dark tokens above when the root opts in. Matches
+   the site's light scale (white bg, chocolate accent). */
 :root[data-theme="light"] {
-  --color-bg: #f7f8fa;
-  --color-panel: #ffffff;
+  --color-bg: #ffffff;
+  --color-panel: #f6f7f9;
   --color-elevated: #eef1f5;
-  --color-border: #e2e6ec;
-  --color-text: #1a1d24;
-  --color-muted: #5b6472;
-  --color-faint: #99a1b0;
-  --color-accent: #6d5efc;
-  --color-accent-ink: #ffffff;
+  --color-border: #e6e8ec;
+  --color-text: #1a1d21;
+  --color-muted: #565c66;
+  --color-faint: #878d97;
+  --color-accent: #d2691e;
+  --color-accent-strong: #b3560f;
+  --color-accent-ink: #1a1205;
   --color-ok: #0f9d58;
   --color-warn: #b26a00;
   --color-danger: #dc2626;
@@ -44,7 +53,7 @@ body {
   margin: 0;
   background: var(--color-bg);
   color: var(--color-text);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }

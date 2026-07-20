@@ -8,6 +8,7 @@ import { useDialogs } from "@/lib/dialogs";
 import { applyTheme, getTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/cn";
 import { CommandPalette } from "./CommandPalette";
+import { Logo } from "@/components/ui/logo";
 
 export function Layout() {
   const { bucket } = useParams();
@@ -51,7 +52,7 @@ export function Layout() {
     <div className="grid h-full grid-cols-[240px_1fr]">
       <aside className="flex min-h-0 flex-col border-r border-border bg-panel">
         <Link to="/" className="flex h-14 items-center gap-2.5 border-b border-border px-4">
-          <span className="size-2.5 rounded-full bg-gradient-to-br from-accent to-fuchsia-400 shadow-[0_0_0_3px] shadow-accent/20" />
+          <Logo className="size-6" />
           <span className="font-semibold tracking-tight">barme</span>
         </Link>
 
