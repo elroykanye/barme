@@ -16,7 +16,7 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:0.5.1
+      -v barme:/data elroykanye/barme:0.7.0
 
 Console on http://localhost:7374. On first start barme prints a generated owner
 login (access key `barme`, a random secret) — copy it from the logs, or set your
@@ -87,8 +87,9 @@ output into the binary, so a release build is a single self-contained executable
 
     cargo build --release -p barmed --features ui
 
-Auth is on by default with the credential `barme` / `barme` (SigV4 on the S3
-door, Basic on the native door). Override it with `BARME_ACCESS_KEY` and
+Auth is on by default. There's no built-in login: on first start with no
+credential set, barme mints a random owner and prints it once (SigV4 on the S3
+door, Basic on the native door). Set your own with `BARME_ACCESS_KEY` and
 `BARME_SECRET_KEY`, or in `barme.toml`. Set `BARME_EMBED_URL` to enable semantic
 search. Config, ports, and the full API are covered in
 [`docs/USAGE.md`](docs/USAGE.md).
@@ -100,15 +101,16 @@ search. Config, ports, and the full API are covered in
 
 ## Status
 
-Alpha (v0.5.1). It works end to end, but it's early: uploads and downloads
-stream (memory stays flat regardless of object size), an acknowledged write
-survives a hard kill of the process (writes are fsync-durable and the daemon
-recovers on restart), concurrent writes and garbage collection are safe under
-load, uploads are capped by `max_upload_bytes` (default 512 MiB), there's no
-default login (a random owner is minted on first boot), and access-key secrets
-are encrypted at rest. Still early though — formats and on-disk layout may still
-change before v1, and object contents aren't encrypted. Don't put anything you
-can't lose in it yet.
+Alpha (v0.7.0). It works end to end, but it's early: uploads and downloads
+stream (memory stays flat regardless of object size), large objects can be
+written with S3 multipart, an acknowledged write survives a hard kill of the
+process (writes are fsync-durable and the daemon recovers on restart), concurrent
+writes and garbage collection are safe under load, there's no default login (a
+random owner is minted on first boot), access-key secrets are encrypted at rest,
+and the on-disk format and API surface are versioned and frozen (see
+[docs/STABILITY.md](docs/STABILITY.md)). Still early though — the freeze is the
+intended contract but formats may still shift before 1.0, and object contents
+aren't encrypted. Don't put anything you can't lose in it yet.
 
 ## License
 

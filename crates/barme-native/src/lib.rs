@@ -1096,9 +1096,11 @@ td{padding:7px 8px;border-bottom:1px solid #232a33;vertical-align:top}
 .m{font:12px ui-monospace,monospace;color:#43d17a;white-space:nowrap}
 code{font:12px ui-monospace,monospace;color:#e6e9ef}.d{color:#8b93a1}
 a{color:#7c6cff}
+.exp{font-size:.6rem;background:#3a2f12;color:#e0b341;padding:2px 6px;border-radius:5px;letter-spacing:.04em;margin-left:8px;vertical-align:middle;text-transform:uppercase}
 </style></head><body><main>
 <h1><span class=dot></span>barme API</h1>
 <p class=d>Native API. Auth is HTTP Basic (access:secret); reads on public pots are open. S3 clients use the S3 door with SigV4.</p>
+<p class=d>Sections marked <span class=exp>experimental</span> may change between releases. Everything else is part of the stable v1 API contract. Image codecs (perceptual fidelity) are also experimental — routed and recorded in the manifest, but not yet transcoding.</p>
 
 <h2>Pots</h2><table>
 <tr><td class=m>GET</td><td><code>/pots</code></td><td class=d>list pots</td></tr>
@@ -1123,12 +1125,12 @@ a{color:#7c6cff}
 <tr><td class=m>GET</td><td><code>/content/{hash}</code></td><td class=d>fetch by content hash</td></tr>
 </table>
 
-<h2>Search &amp; AI</h2><table>
+<h2>Search &amp; AI <span class=exp>experimental</span></h2><table>
 <tr><td class=m>POST</td><td><code>/search</code></td><td class=d>{query} — semantic search</td></tr>
 <tr><td class=m>POST</td><td><code>/similar/{hash}</code></td><td class=d>nearest objects</td></tr>
 </table>
 
-<h2>Merkle &amp; sync</h2><table>
+<h2>Merkle &amp; sync <span class=exp>experimental</span></h2><table>
 <tr><td class=m>GET</td><td><code>/proof/{pot}/{key}?index</code></td><td class=d>inclusion proof for one chunk</td></tr>
 <tr><td class=m>GET</td><td><code>/delta/{pot}/{key}?a&b</code></td><td class=d>chunks to transfer between versions</td></tr>
 <tr><td class=m>GET</td><td><code>/object/{id}</code></td><td class=d>manifest by object_id</td></tr>
@@ -1141,7 +1143,7 @@ a{color:#7c6cff}
 <tr><td class=m>GET</td><td><code>/stats</code> · <code>/health</code> · <code>/metrics</code></td><td class=d>storage stats, health, Prometheus</td></tr>
 <tr><td class=m>GET/POST</td><td><code>/keys</code></td><td class=d>list / create access keys</td></tr>
 <tr><td class=m>DELETE</td><td><code>/keys/{access}</code></td><td class=d>revoke a key</td></tr>
-<tr><td class=m>GET/POST</td><td><code>/webhooks</code></td><td class=d>list / create webhooks</td></tr>
+<tr><td class=m>GET/POST</td><td><code>/webhooks</code> <span class=exp>experimental</span></td><td class=d>list / create webhooks</td></tr>
 </table>
 </main></body></html>"#;
 

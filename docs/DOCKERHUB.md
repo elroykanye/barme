@@ -30,7 +30,7 @@ Store and read an object:
 ## Tags
 
 - `latest` — most recent release
-- `0.5.1`, `0.5.x` — pinned versions
+- `0.7.0`, `0.7.x` — pinned versions
 
 ## Image
 
