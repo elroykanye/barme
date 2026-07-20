@@ -751,6 +751,41 @@ impl Engine {
         Ok(self.store.pointers.buckets()?)
     }
 
+    /// Explicitly create a pot: persist its default config so the pot is known
+    /// even before anything is written to it. Idempotent — creating a pot that
+    /// already exists is a no-op, not an error. Writes never need this (a first
+    /// PUT to an unknown pot still lands); it exists so S3 clients that provision
+    /// a bucket up front, and tooling that lists pots, see what they expect.
+    pub fn create_bucket(&self, bucket: &str) -> Result<()> {
+        if bucket.is_empty() {
+            return Err(EngineError::InvalidKey("pot name must not be empty".into()));
+        }
+        if !self.store.meta.exists(bucket) {
+            self.store
+                .meta
+                .set_config(bucket, &barme_core::BucketConfig::default())?;
+        }
+        Ok(())
+    }
+
+    /// Whether a pot exists: it was explicitly created (has a config), or it
+    /// currently holds objects.
+    pub fn bucket_exists(&self, bucket: &str) -> Result<bool> {
+        if self.store.meta.exists(bucket) {
+            return Ok(true);
+        }
+        Ok(self.store.pointers.buckets()?.iter().any(|b| b == bucket))
+    }
+
+    /// Every pot the store knows: created (has a config) or written to (has
+    /// keys), deduplicated and sorted.
+    pub fn list_buckets(&self) -> Result<Vec<String>> {
+        let mut set: std::collections::BTreeSet<String> =
+            self.store.pointers.buckets()?.into_iter().collect();
+        set.extend(self.store.meta.list()?);
+        Ok(set.into_iter().collect())
+    }
+
     /// Keys currently present in a bucket.
     pub fn keys(&self, bucket: &str) -> Result<Vec<String>> {
         Ok(self.store.pointers.list(bucket)?)
