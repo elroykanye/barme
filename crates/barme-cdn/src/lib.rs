@@ -4,7 +4,11 @@
 //!   /cdn/{hash}            immutable. A content hash never changes, so this is
 //!                          served `Cache-Control: immutable, max-age=1yr` and
 //!                          caches forever at every layer. Capability URL: the
-//!                          256-bit hash is the token.
+//!                          256-bit hash is the token. Permanent and unrevocable:
+//!                          deletion at the origin can't pull cached bytes back,
+//!                          so this is for public, non-erasable content only.
+//!                          Erasable/personal data goes through `/s/` (below),
+//!                          which is short-lived and revalidated. See issue #6.
 //!   /public/{bucket}/{key} friendly. Only served when the bucket is public;
 //!                          revalidated with an ETag (the object id) so a stale
 //!                          cache gets a cheap 304.

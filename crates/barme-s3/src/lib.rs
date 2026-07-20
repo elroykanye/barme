@@ -18,7 +18,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{Path, RawQuery, Request, State},
-    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -199,6 +199,8 @@ async fn put_object(
 
     let mut out = HeaderMap::new();
     out.insert(header::ETAG, etag(&object_id.to_string()));
+    let (n, v) = object_id_header(&object_id.to_string());
+    out.insert(n, v);
     Ok((StatusCode::OK, out).into_response())
 }
 
@@ -269,7 +271,13 @@ async fn post_object(
         })
         .await
         .map_err(|e| S3Error::Internal(e.to_string()))??;
-        return Ok(xml_response(complete_xml(&bucket, &key, &object_id.to_string())));
+        // Surface the object id in a header too: the completion ETag is XML-body
+        // only, and a client building a /cdn link needs the hash the same way it
+        // gets one from a single PUT.
+        let mut resp = xml_response(complete_xml(&bucket, &key, &object_id.to_string()));
+        let (n, v) = object_id_header(&object_id.to_string());
+        resp.headers_mut().insert(n, v);
+        return Ok(resp);
     }
 
     Ok(StatusCode::NOT_IMPLEMENTED.into_response())
@@ -341,6 +349,8 @@ async fn head_object(
             .unwrap_or(HeaderValue::from_static(DEFAULT_CONTENT_TYPE)),
     );
     out.insert(header::ETAG, etag(&manifest.object_id.to_string()));
+    let (n, v) = object_id_header(&manifest.object_id.to_string());
+    out.insert(n, v);
     // Status + headers only; HEAD carries no body.
     Ok((StatusCode::OK, out).into_response())
 }
@@ -418,6 +428,20 @@ async fn delete_bucket(
 async fn list_buckets(State(st): State<S3State>) -> Result<Response, S3Error> {
     let buckets = st.engine.list_buckets()?;
     Ok(xml_response(list_buckets_xml(&buckets)))
+}
+
+/// Header carrying the object's own content id (its blake3) — the handle for a
+/// `/cdn/{hash}` link. Set on both write paths (single PUT and multipart
+/// complete) and on HEAD, so a client gets the same hash regardless of how the
+/// object was written. The S3 ETag can't be relied on for this: a multipart
+/// ETag is a digest-of-digests, not the object hash. See issue #7.
+const OBJECT_ID_HEADER: &str = "x-barme-object-id";
+
+fn object_id_header(id: &str) -> (HeaderName, HeaderValue) {
+    (
+        HeaderName::from_static(OBJECT_ID_HEADER),
+        HeaderValue::from_str(id).unwrap_or(HeaderValue::from_static("")),
+    )
 }
 
 /// S3 etags are quoted. Bad chars can't appear in a blake3 id, so this is safe.
@@ -882,5 +906,98 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status(&app, "DELETE", "/full").await, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn object_id_header_is_consistent_across_write_paths_and_head() {
+        let app = app(state());
+        let hdr = |res: &Response| {
+            res.headers()
+                .get("x-barme-object-id")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+
+        // Single PUT surfaces the object id (the /cdn handle).
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/pot/small.bin")
+                    .body(Body::from(&b"tiny"[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let put_id = hdr(&res).expect("PUT must carry x-barme-object-id");
+        assert!(put_id.starts_with("blake3:"));
+
+        // HEAD returns the same id.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/pot/small.bin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hdr(&res).as_deref(), Some(put_id.as_str()));
+
+        // Multipart complete carries it too — the whole point of #7, since the
+        // multipart ETag isn't the object hash.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pot/big.bin?uploads")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let xml = res.into_body().collect().await.unwrap().to_bytes();
+        let uid = between(&String::from_utf8_lossy(&xml), "<UploadId>", "</UploadId>");
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/pot/big.bin?partNumber=1&uploadId={uid}"))
+                    .body(Body::from(vec![7u8; 100_000]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let complete = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber></Part></CompleteMultipartUpload>";
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/pot/big.bin?uploadId={uid}"))
+                    .body(Body::from(complete))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let mp_id = hdr(&res).expect("multipart complete must carry x-barme-object-id");
+        assert!(mp_id.starts_with("blake3:"));
+
+        // HEAD on the multipart object returns the same handle.
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("HEAD")
+                    .uri("/pot/big.bin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hdr(&res).as_deref(), Some(mp_id.as_str()));
     }
 }

@@ -1,50 +1,60 @@
-# barme 0.9.0
+# barme 1.0.0
 
-The operability pass: barme is now something you can watch, probe, and back up
-with confidence — the last of the three v1 promises ("run it, watch it, back it
-up, recover it"). The remaining gaps before 1.0 are closed.
+barme is 1.0. It makes three promises and keeps them:
 
-## What changed
+1. **The on-disk format and API are frozen.** Anything written to a 1.x server
+   reads on every later 1.x. Format changes ride a version stamp and a migration,
+   never a silent break.
+2. **You can trust it with data.** An acknowledged write survives a hard kill
+   (fsync-durable, recovers on restart); concurrent writes and GC are safe under
+   load; secrets are encrypted at rest; there's no standing default credential.
+3. **It's operable.** Liveness + readiness probes, Prometheus `/metrics`, a
+   documented and tested backup/restore story, and a Helm chart.
 
-- **Backup and restore, documented and proven.** The data directory is a
-  self-contained, coherent backup target; `docs/USAGE.md` covers how to snapshot
-  it, where the master key must live, and how to restore. A test copies a
-  populated data dir elsewhere, reopens it, and confirms every object reads back
-  byte-for-byte with history and integrity intact.
-- **Readiness endpoint.** `GET /ready` returns 503 when the store can't be read,
-  distinct from `GET /health` (liveness). The Helm chart's readiness probe now
-  points at it.
-- **Richer metrics.** `/metrics` adds GC counters — sweeps, chunks condemned,
-  chunks erased, and reachable chunks from the last sweep — plus logical bytes
-  alongside physical, so dedup savings and GC activity are visible to Prometheus.
-- **Server-side verify in the crash harness.** After every crash, the harness now
-  cross-checks each acknowledged object against the server's own `POST /verify`,
-  so recovery (download + re-hash) and the store's integrity check must agree.
-- **Fuzzed name handling.** A property test throws arbitrary unicode, slashes, and
-  lengths straddling the 255-byte filename bound at `put`/`get`: they either
-  round-trip or reject cleanly, never panic.
-- **Structured request logs.** Requests carry `method`/`uri`/`status`/`latency`
-  through the HTTP trace layer, kept at debug so health probes don't spam the log;
-  enable with `RUST_LOG=…,tower_http::trace=debug`.
+Everything is proven by harnesses that run in CI territory, not just asserted:
+crash/kill durability, GC-under-load, security posture, multipart abuse, and a
+copied-data-dir restore.
+
+## In this release
+
+Two delivery-correctness fixes closed before cutting 1.0:
+
+- **`/cdn/{hash}` erasure caveat, documented (#6).** The immutable, cache-forever
+  hash URL can't be revoked once bytes are in a cache, so deleting at the origin
+  can't pull them back. This is now written down clearly — `/cdn` is for public,
+  non-erasable content; serve erasable or personal data over the short-lived
+  `/s/{pot}/{key}` share instead. Documented in USAGE, STABILITY, and the code.
+- **Object hash surfaced on every write path (#7).** A new `X-Barme-Object-Id`
+  response header carries the object's content id on single PUT, multipart
+  complete, and HEAD — the reliable handle for a `/cdn` link, since an S3
+  multipart ETag is a digest of part digests, not the object hash.
+
+## The road here
+
+- 0.4.x — durability (fsync, crash recovery) and concurrency/GC hardening
+- 0.5.x — security (encrypted secrets, no default login, presign, CORS)
+- 0.6.0 — S3 multipart upload
+- 0.7.0 — on-disk format version + API freeze
+- 0.8.0 — S3 bucket operations, Helm chart
+- 0.9.0 — operability (backup/restore, readiness, metrics, name fuzzing)
+- 1.0.0 — the delivery caveats above, and meaning the three promises
 
 ## Compatibility
 
-Drop-in over 0.8.0. New endpoint (`/ready`) and metrics only; on-disk format and
-the stable API are unchanged. Helm chart bumped to 0.2.0 / appVersion 0.9.0.
+Drop-in over 0.9.0. This is the compatibility baseline: 1.x won't break 1.0 data
+or the stable API (see `docs/STABILITY.md`).
 
 ## Docker
 
 ```
 docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
   -e BARME_MASTER_KEY=$(openssl rand -hex 32) \
-  -v barme:/data elroykanye/barme:0.9.0
+  -v barme:/data elroykanye/barme:1.0.0
 ```
 
-## Known limits
+## Scope and what's next
 
-- Alpha, but close: with this pass the v1 blocks (durability, security, format +
-  API freeze, ops) are all done. A 1.0 is a decision away.
-- `GET /{pot}` (S3 ListObjects) is still not implemented; use native
-  `/pots/{pot}/objects`.
-- Object contents aren't encrypted (secrets at rest are).
-- Single node. Image codecs (JPEG XL, AVIF) are routed but not yet transcoding.
+1.0 is a single node you'd trust. Not in 1.0, by design: horizontal
+distribution (the v2 headline — content-addressing makes replication cheap to add
+later), encryption of object contents, and the experimental surfaces (semantic
+search, sync, webhooks, image-codec transcoding) that stay marked as such.

@@ -37,7 +37,10 @@ Frozen as the v1 contract:
 - **S3 door** — object PUT/GET/DELETE/HEAD, the multipart sequence, and bucket
   create/head/delete plus ListBuckets, AWS SigV4. (The S3 wire contract is AWS's;
   barme tracks it.)
-- **CDN door** — `/cdn/{hash}`, `/public/{pot}/{key}`, `/s/...` (presigned share)
+- **CDN door** — `/cdn/{hash}`, `/public/{pot}/{key}`, `/s/...` (presigned share).
+  Note: `/cdn/{hash}` caches permanently and can't be revoked, so it's for public,
+  non-erasable content only — serve erasable/personal data over `/s/` (see
+  "Delivery links" in `docs/USAGE.md`).
 - **Ops** — `/health`, `/stats`, `/metrics`
 - **On-disk layout** — the store directory structure and the v1 manifest schema
   (pinned by a content-hash test so a silent change fails CI)

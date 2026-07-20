@@ -16,7 +16,7 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:0.9.0
+      -v barme:/data elroykanye/barme:1.0.0
 
 Console on http://localhost:7374. On first start barme prints a generated owner
 login (access key `barme`, a random secret) — copy it from the logs, or set your
@@ -108,16 +108,25 @@ See [`charts/barme/README.md`](charts/barme/README.md) for values and ingress.
 
 ## Status
 
-Alpha (v0.9.0). It works end to end, but it's early: uploads and downloads
-stream (memory stays flat regardless of object size), large objects can be
-written with S3 multipart, an acknowledged write survives a hard kill of the
-process (writes are fsync-durable and the daemon recovers on restart), concurrent
-writes and garbage collection are safe under load, there's no default login (a
-random owner is minted on first boot), access-key secrets are encrypted at rest,
-and the on-disk format and API surface are versioned and frozen (see
-[docs/STABILITY.md](docs/STABILITY.md)). Still early though — the freeze is the
-intended contract but formats may still shift before 1.0, and object contents
-aren't encrypted. Don't put anything you can't lose in it yet.
+Stable (v1.0). barme makes three promises and keeps them:
+
+- **The on-disk format and API are frozen.** Data written to a 1.x server reads
+  on every later 1.x; format changes ride a version stamp and a migration, never
+  a silent break. See [docs/STABILITY.md](docs/STABILITY.md).
+- **You can trust it with data.** An acknowledged write survives a hard kill
+  (fsync-durable, recovers on restart), concurrent writes and GC are safe under
+  load, secrets are encrypted at rest, and there's no standing default credential.
+- **It's operable.** Health and readiness probes, Prometheus `/metrics`, a
+  documented backup/restore story, and a Helm chart.
+
+Uploads and downloads stream (flat memory regardless of object size), large
+objects go through S3 multipart, and it runs from a single self-contained binary
+or one `helm install`.
+
+Honest scope: it's a **single node** (durability is the volume plus backups, not
+replication — that's the v2 story), object *contents* aren't encrypted (secrets
+at rest are), and a few surfaces are still experimental (semantic search, sync,
+webhooks, image codecs — marked in `/docs`).
 
 ## License
 

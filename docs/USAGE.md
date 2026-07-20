@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.9.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:1.0.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -147,6 +147,29 @@ barme replicates an object by transferring only the chunks the far side doesn't 
 Prove a specific chunk belongs to an object, without shipping the whole object:
 
     curl -u barme:barme "http://localhost:7373/proof/photos/cat.jpg?index=0"
+
+## Delivery links
+
+The CDN door (7375) serves object bytes over three URL shapes:
+
+- `GET /cdn/{hash}` — immutable, by content hash. Served `Cache-Control:
+  immutable, max-age=1y`, so it caches forever at every layer; the hash is the
+  capability (anyone holding it can fetch).
+- `GET /public/{pot}/{key}` — only for pots marked public; revalidated with an ETag.
+- `GET /s/{pot}/{key}?exp&sig` — a time-limited signed share of a private object;
+  short-lived and revalidated.
+
+Get the hash for a `/cdn` link from the **`X-Barme-Object-Id`** response header.
+Every write returns it — a single PUT and a multipart complete alike — and HEAD
+returns it for a known key. Use this rather than the ETag: an S3 multipart ETag
+is a digest of the part digests, not the object's own hash.
+
+> **`/cdn/{hash}` is permanent and cannot be revoked.** Because it caches
+> forever, deleting an object at the origin does not stop caches that already hold
+> the bytes from serving them for up to a year. **Never serve erasable or personal
+> data over `/cdn/{hash}`** — if you might have to honor a deletion, serve it over
+> `/s/{pot}/{key}` (short-lived, revalidated) instead. `/cdn` is for public,
+> non-erasable content.
 
 ## Observability
 
