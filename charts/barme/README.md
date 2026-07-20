@@ -50,6 +50,17 @@ anything you leave blank under `auth` is generated once on first install and
 **preserved across upgrades** (the chart reads the existing Secret back), so an
 upgrade never rotates the master key out from under your data.
 
+> **GitOps warning — set `auth.masterKey` (or `auth.existingSecret`) explicitly.**
+> The preservation above relies on Helm's `lookup`, which reads the live cluster.
+> `helm install` and `helm upgrade` (and Flux, which runs real Helm) have that
+> access. **Argo CD and any other `helm template`-based renderer do not** — there
+> `lookup` returns nothing, so a blank `auth.masterKey` is **regenerated on every
+> sync**, and a rotated master key makes all stored key secrets permanently
+> undecryptable. If you deploy this chart through Argo CD or a `helm template`
+> pipeline, always pin `auth.masterKey`/`auth.secretKey`/`auth.accessKey` to
+> values you hold (ideally via `auth.existingSecret` and a sealed/managed Secret).
+> Leaving them blank is only safe under `helm install`/`helm upgrade` or Flux.
+
 Read the generated credential back with:
 
 ```

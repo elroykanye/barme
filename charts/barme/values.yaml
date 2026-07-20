@@ -18,6 +18,12 @@ fullnameOverride: ""
 # generated once on first install and preserved across upgrades (the chart reads
 # the existing Secret back). Set them explicitly for real deployments, or point
 # existingSecret at a Secret you manage yourself.
+#
+# GitOps warning: preservation uses Helm's `lookup`, which needs live-cluster
+# access. `helm install`/`helm upgrade` and Flux have it; Argo CD and other
+# `helm template` renderers do NOT, so a blank masterKey there regenerates on
+# every sync and makes stored secrets permanently undecryptable. Under Argo CD /
+# `helm template`, always pin masterKey (and ideally use existingSecret).
 auth:
   # Owner access key. Blank -> generated (barme-XXXX...).
   accessKey: ""
