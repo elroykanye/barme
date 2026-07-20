@@ -852,11 +852,37 @@ impl Engine {
         Ok(())
     }
 
-    /// Delete a bucket and all its pointers. Chunks are reclaimed by GC.
+    /// Delete a bucket and all its pointers. A force delete — used by the native
+    /// "delete pot" op. Chunks are reclaimed by GC. Racing this with a write to
+    /// the same pot is inherently "which wins"; callers that must not lose a
+    /// concurrent write (S3 DeleteBucket) use [`Engine::delete_bucket_if_empty`].
     pub fn delete_bucket(&self, bucket: &str) -> Result<()> {
         self.store.pointers.delete_bucket(bucket)?;
         self.store.meta.delete_bucket(bucket)?;
         Ok(())
+    }
+
+    /// Delete a bucket only if it holds no objects, atomically. Returns `false`
+    /// (deleting nothing) if it still has objects, so the caller can answer 409.
+    ///
+    /// Unlike [`Engine::delete_bucket`], this can't lose a concurrent write: a
+    /// naive check-then-delete could see an empty bucket, then a racing PUT
+    /// commits a pointer, then the delete wipes it — an acknowledged write lost.
+    /// Here every commit-lock shard is held across the emptiness check and the
+    /// delete, so no pointer can commit in the gap. Writers only ever hold one
+    /// shard, so acquiring all of them in index order can't deadlock.
+    pub fn delete_bucket_if_empty(&self, bucket: &str) -> Result<bool> {
+        let _guards: Vec<MutexGuard<'_, ()>> = self
+            .key_locks
+            .iter()
+            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()))
+            .collect();
+        if !self.store.pointers.list(bucket)?.is_empty() {
+            return Ok(false);
+        }
+        self.store.pointers.delete_bucket(bucket)?;
+        self.store.meta.delete_bucket(bucket)?;
+        Ok(true)
     }
 
     /// Move an object to a new bucket/key, keeping its version history. Returns

@@ -395,16 +395,23 @@ async fn head_bucket(
 }
 
 /// DeleteBucket: refuse a non-empty pot (409, matching S3's BucketNotEmpty),
-/// otherwise forget its config. Object chunks are reclaimed by GC as usual.
+/// otherwise forget its config. Object chunks are reclaimed by GC as usual. The
+/// emptiness check and the delete are atomic (see `delete_bucket_if_empty`), so a
+/// PUT racing the delete can't have its just-acknowledged object silently wiped.
+/// Runs on a blocking task because it briefly holds the commit locks.
 async fn delete_bucket(
     State(st): State<S3State>,
     Path(bucket): Path<String>,
 ) -> Result<Response, S3Error> {
-    if !st.engine.keys(&bucket)?.is_empty() {
-        return Ok((StatusCode::CONFLICT, "bucket not empty").into_response());
+    let engine = st.engine.clone();
+    let deleted = tokio::task::spawn_blocking(move || engine.delete_bucket_if_empty(&bucket))
+        .await
+        .map_err(|e| S3Error::Internal(e.to_string()))??;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Ok((StatusCode::CONFLICT, "bucket not empty").into_response())
     }
-    st.engine.delete_bucket(&bucket)?;
-    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// ListBuckets: every pot the store knows, created or written to.

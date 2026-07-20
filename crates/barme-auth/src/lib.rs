@@ -187,6 +187,29 @@ mod tests {
         assert!(!authorize(None, Action::Write, "p", true));
     }
 
+    // S3 bucket-level verbs authorize against a bucket name derived from the
+    // path: "" for ListBuckets (GET /), the pot name for Create/Head/Delete.
+    // These lock in that behavior.
+    #[test]
+    fn bucket_verb_authorization() {
+        // ListBuckets (Read, empty bucket): an unscoped owner can; anonymous
+        // can't (the empty bucket is never public); a *scoped* key can't either
+        // — it fails closed, since "" is not in its pot list. That means a
+        // pot-scoped credential cannot ListBuckets over S3; intended, not a hole.
+        assert!(authorize(Some(&owner()), Action::Read, "", false));
+        assert!(!authorize(None, Action::Read, "", false));
+        let mut scoped = owner();
+        scoped.pots = vec!["photos".into()];
+        assert!(!authorize(Some(&scoped), Action::Read, "", false));
+
+        // CreateBucket (Write) and DeleteBucket (Delete) need the owner and
+        // respect scoping on the named pot.
+        assert!(authorize(Some(&owner()), Action::Write, "reports", false));
+        assert!(!authorize(None, Action::Write, "reports", false));
+        assert!(authorize(Some(&scoped), Action::Delete, "photos", false));
+        assert!(!authorize(Some(&scoped), Action::Delete, "reports", false));
+    }
+
     #[test]
     fn presign_round_trips_and_expires() {
         let sig = presign("secret", "photos", "cat.jpg", 1000);
