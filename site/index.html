@@ -48,7 +48,7 @@
       "name": "barme",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux, macOS, Windows, Docker, Kubernetes",
-      "softwareVersion": "0.7.0",
+      "softwareVersion": "1.0.0",
       "description": "An open-source, self-hostable object store that speaks the S3 API and stores objects by content hash for deduplication, cheap versioning, integrity-checked reads, and efficient sync.",
       "url": "https://elroykanye.github.io/barme/",
       "downloadUrl": "https://github.com/elroykanye/barme/releases",
@@ -107,7 +107,7 @@
 
   <section class="hero">
     <div class="wrap">
-      <span class="badge"><span class="badge-dot" aria-hidden="true"></span>Alpha · v0.7.0 · MIT licensed</span>
+      <span class="badge"><span class="badge-dot" aria-hidden="true"></span><span>Stable · v<span class="barme-version">1.0.0</span> · MIT licensed</span></span>
       <h1>The object store that stores by <span class="grad">content</span>, not filename.</h1>
       <p class="lede">barme speaks the S3 API, then goes further. Every object is split into content-addressed chunks, so you get deduplication, cheap versioning, and integrity-checked reads without extra machinery. Self-hostable, single binary, written in Rust.</p>
       <div class="hero-cta">
@@ -122,7 +122,7 @@
         <div class="code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:6px">run barme with Docker</span></div>
         <pre><code>docker run -p 7373:7373 -p 7374:7374 \
   -p 7375:7375 -p 9000:9000 \
-  -v barme:/data elroykanye/barme:0.7.0</code></pre>
+  -v barme:/data elroykanye/barme:<span class="barme-version">1.0.0</span></code></pre>
       </div>
     </div>
   </section>
@@ -228,7 +228,7 @@
         <p>Grab a binary, pull the Docker image, or install the Helm chart. No default login, secrets encrypted at rest.</p>
         <div class="hero-cta">
           <a class="btn btn-primary" href="docs.html">Read the docs</a>
-          <a class="btn btn-ghost" href="https://github.com/elroykanye/barme/releases" rel="noopener">Download a release</a>
+          <a class="btn btn-ghost" href="https://github.com/elroykanye/barme/releases/latest" data-release-link rel="noopener"><span>Download v<span class="barme-version">1.0.0</span></span></a>
         </div>
       </div>
     </div>
@@ -256,5 +256,6 @@
     try { var s = localStorage.getItem(k); if (s) document.documentElement.setAttribute('data-theme', s); } catch (e) {}
   })();
 </script>
+<script src="version.js" defer></script>
 </body>
 </html>

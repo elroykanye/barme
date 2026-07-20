@@ -97,7 +97,7 @@
       <h2 id="run">Run it</h2>
       <p>With Docker:</p>
       <pre><code>docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-  -v barme:/data elroykanye/barme:0.7.0</code></pre>
+  -v barme:/data elroykanye/barme:<span class="barme-version">1.0.0</span></code></pre>
       <p>Or download a <code>barmed</code> binary from the <a href="https://github.com/elroykanye/barme/releases" rel="noopener">releases</a> and run <code>./barmed</code>. From source: <code>cargo run -p barmed --features ui</code>.</p>
       <div class="callout">The console is at <code>http://localhost:7374</code>. There is no default login. On first start with no credential configured, barme mints a random owner (access key <code>barme</code>, a random secret) and prints it once in the startup output. Copy it then, or set your own with <code>BARME_ACCESS_KEY</code> and <code>BARME_SECRET_KEY</code>.</div>
 
@@ -227,5 +227,6 @@ curl -u barme:barme -X POST http://D:7373/sync/import/photos/cat.jpg \
 <script>
   (function () { var k='barme-theme'; try{var s=localStorage.getItem(k); if(s)document.documentElement.setAttribute('data-theme',s);}catch(e){} })();
 </script>
+<script src="version.js" defer></script>
 </body>
 </html>

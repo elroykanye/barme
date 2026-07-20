@@ -23,6 +23,6 @@
   <text x="98" y="430" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="30" font-weight="400" fill="#a1a7b0">Dedup by content · cheap versioning · integrity by default · self-hostable</text>
   <g font-family="ui-monospace, Menlo, Consolas, monospace" font-size="26" fill="#d7dbe0">
     <rect x="96" y="486" width="1008" height="72" rx="12" fill="#12151a" stroke="#23272e" stroke-width="2"/>
-    <text x="122" y="531"><tspan fill="#f0954a">$</tspan> docker run -p 9000:9000 -v barme:/data elroykanye/barme:0.7.0</text>
+    <text x="122" y="531"><tspan fill="#f0954a">$</tspan> docker run -p 9000:9000 -v barme:/data elroykanye/barme:latest</text>
   </g>
 </svg>
