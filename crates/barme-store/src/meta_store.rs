@@ -46,6 +46,36 @@ impl MetaStore {
         }
     }
 
+    /// Whether this bucket has a persisted config file, i.e. it was explicitly
+    /// created or configured rather than merely implied by a first write.
+    pub fn exists(&self, bucket: &str) -> bool {
+        self.path(bucket).exists()
+    }
+
+    /// Every bucket that has a persisted config, decoded from the hex filenames.
+    /// Buckets that exist only implicitly (written to, never configured) are not
+    /// here; callers union this with the pointer store's bucket list.
+    pub fn list(&self) -> Result<Vec<String>> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e.into()),
+        };
+        let mut out = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name();
+            let name = name.to_string_lossy();
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
+            let Ok(bytes) = hex::decode(stem) else { continue };
+            if let Ok(bucket) = String::from_utf8(bytes) {
+                out.push(bucket);
+            }
+        }
+        Ok(out)
+    }
+
     // Hex-encode the bucket name into a single filename, same trick the pointer
     // store uses for keys, so odd bucket names can't escape the directory.
     fn path(&self, bucket: &str) -> PathBuf {
@@ -83,5 +113,21 @@ mod tests {
         assert!(s.config("photos").unwrap().public_read);
         // A different bucket is unaffected.
         assert!(!s.config("private").unwrap().public_read);
+    }
+
+    #[test]
+    fn exists_and_list_track_configured_buckets() {
+        let (_d, s) = store();
+        assert!(!s.exists("photos"));
+        assert!(s.list().unwrap().is_empty());
+
+        s.set_config("photos", &BucketConfig::default()).unwrap();
+        s.set_config("videos", &BucketConfig::default()).unwrap();
+
+        assert!(s.exists("photos"));
+        assert!(!s.exists("never-made"));
+        let mut listed = s.list().unwrap();
+        listed.sort();
+        assert_eq!(listed, vec!["photos".to_string(), "videos".to_string()]);
     }
 }

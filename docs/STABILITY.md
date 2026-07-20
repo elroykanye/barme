@@ -34,8 +34,9 @@ Frozen as the v1 contract:
 - **Pots** — `/pots` and its sub-resources (`rename`, `visibility`, `config`,
   `objects`, `import`, `zip`), `/ops/copy`, `/ops/move`
 - **Access keys** — `/keys`
-- **S3 door** — object PUT/GET/DELETE/HEAD and the multipart sequence, AWS SigV4.
-  (The S3 wire contract is AWS's; barme tracks it.)
+- **S3 door** — object PUT/GET/DELETE/HEAD, the multipart sequence, and bucket
+  create/head/delete plus ListBuckets, AWS SigV4. (The S3 wire contract is AWS's;
+  barme tracks it.)
 - **CDN door** — `/cdn/{hash}`, `/public/{pot}/{key}`, `/s/...` (presigned share)
 - **Ops** — `/health`, `/stats`, `/metrics`
 - **On-disk layout** — the store directory structure and the v1 manifest schema

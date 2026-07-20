@@ -751,6 +751,41 @@ impl Engine {
         Ok(self.store.pointers.buckets()?)
     }
 
+    /// Explicitly create a pot: persist its default config so the pot is known
+    /// even before anything is written to it. Idempotent — creating a pot that
+    /// already exists is a no-op, not an error. Writes never need this (a first
+    /// PUT to an unknown pot still lands); it exists so S3 clients that provision
+    /// a bucket up front, and tooling that lists pots, see what they expect.
+    pub fn create_bucket(&self, bucket: &str) -> Result<()> {
+        if bucket.is_empty() {
+            return Err(EngineError::InvalidKey("pot name must not be empty".into()));
+        }
+        if !self.store.meta.exists(bucket) {
+            self.store
+                .meta
+                .set_config(bucket, &barme_core::BucketConfig::default())?;
+        }
+        Ok(())
+    }
+
+    /// Whether a pot exists: it was explicitly created (has a config), or it
+    /// currently holds objects.
+    pub fn bucket_exists(&self, bucket: &str) -> Result<bool> {
+        if self.store.meta.exists(bucket) {
+            return Ok(true);
+        }
+        Ok(self.store.pointers.buckets()?.iter().any(|b| b == bucket))
+    }
+
+    /// Every pot the store knows: created (has a config) or written to (has
+    /// keys), deduplicated and sorted.
+    pub fn list_buckets(&self) -> Result<Vec<String>> {
+        let mut set: std::collections::BTreeSet<String> =
+            self.store.pointers.buckets()?.into_iter().collect();
+        set.extend(self.store.meta.list()?);
+        Ok(set.into_iter().collect())
+    }
+
     /// Keys currently present in a bucket.
     pub fn keys(&self, bucket: &str) -> Result<Vec<String>> {
         Ok(self.store.pointers.list(bucket)?)
@@ -817,11 +852,37 @@ impl Engine {
         Ok(())
     }
 
-    /// Delete a bucket and all its pointers. Chunks are reclaimed by GC.
+    /// Delete a bucket and all its pointers. A force delete — used by the native
+    /// "delete pot" op. Chunks are reclaimed by GC. Racing this with a write to
+    /// the same pot is inherently "which wins"; callers that must not lose a
+    /// concurrent write (S3 DeleteBucket) use [`Engine::delete_bucket_if_empty`].
     pub fn delete_bucket(&self, bucket: &str) -> Result<()> {
         self.store.pointers.delete_bucket(bucket)?;
         self.store.meta.delete_bucket(bucket)?;
         Ok(())
+    }
+
+    /// Delete a bucket only if it holds no objects, atomically. Returns `false`
+    /// (deleting nothing) if it still has objects, so the caller can answer 409.
+    ///
+    /// Unlike [`Engine::delete_bucket`], this can't lose a concurrent write: a
+    /// naive check-then-delete could see an empty bucket, then a racing PUT
+    /// commits a pointer, then the delete wipes it — an acknowledged write lost.
+    /// Here every commit-lock shard is held across the emptiness check and the
+    /// delete, so no pointer can commit in the gap. Writers only ever hold one
+    /// shard, so acquiring all of them in index order can't deadlock.
+    pub fn delete_bucket_if_empty(&self, bucket: &str) -> Result<bool> {
+        let _guards: Vec<MutexGuard<'_, ()>> = self
+            .key_locks
+            .iter()
+            .map(|m| m.lock().unwrap_or_else(|p| p.into_inner()))
+            .collect();
+        if !self.store.pointers.list(bucket)?.is_empty() {
+            return Ok(false);
+        }
+        self.store.pointers.delete_bucket(bucket)?;
+        self.store.meta.delete_bucket(bucket)?;
+        Ok(true)
     }
 
     /// Move an object to a new bucket/key, keeping its version history. Returns

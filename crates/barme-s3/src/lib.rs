@@ -89,6 +89,12 @@ pub struct S3State {
 pub fn app(state: S3State) -> Router {
     let max_upload = state.max_upload_bytes;
     Router::new()
+        // Pot-level (S3 bucket) operations.
+        .route("/", get(list_buckets))
+        .route("/{bucket}", put(create_bucket))
+        .route("/{bucket}", axum::routing::head(head_bucket))
+        .route("/{bucket}", delete(delete_bucket))
+        // Object-level operations (and the multipart sequence by query param).
         .route("/{bucket}/{*key}", put(put_object))
         .route("/{bucket}/{*key}", get(get_object))
         .route("/{bucket}/{*key}", post(post_object))
@@ -359,6 +365,61 @@ async fn delete_object(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+// ---- pot (bucket) operations ----
+
+/// CreateBucket. Idempotent: making a pot that already exists is a success, not
+/// an error. Persists the pot so a later HeadBucket and ListBuckets see it even
+/// while it is empty.
+async fn create_bucket(
+    State(st): State<S3State>,
+    Path(bucket): Path<String>,
+) -> Result<Response, S3Error> {
+    st.engine.create_bucket(&bucket)?;
+    let mut out = HeaderMap::new();
+    if let Ok(loc) = HeaderValue::from_str(&format!("/{bucket}")) {
+        out.insert(header::LOCATION, loc);
+    }
+    Ok((StatusCode::OK, out).into_response())
+}
+
+/// HeadBucket: 200 if the pot exists (created or written to), 404 otherwise.
+async fn head_bucket(
+    State(st): State<S3State>,
+    Path(bucket): Path<String>,
+) -> Result<Response, S3Error> {
+    if st.engine.bucket_exists(&bucket)? {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(StatusCode::NOT_FOUND.into_response())
+    }
+}
+
+/// DeleteBucket: refuse a non-empty pot (409, matching S3's BucketNotEmpty),
+/// otherwise forget its config. Object chunks are reclaimed by GC as usual. The
+/// emptiness check and the delete are atomic (see `delete_bucket_if_empty`), so a
+/// PUT racing the delete can't have its just-acknowledged object silently wiped.
+/// Runs on a blocking task because it briefly holds the commit locks.
+async fn delete_bucket(
+    State(st): State<S3State>,
+    Path(bucket): Path<String>,
+) -> Result<Response, S3Error> {
+    let engine = st.engine.clone();
+    let deleted = tokio::task::spawn_blocking(move || engine.delete_bucket_if_empty(&bucket))
+        .await
+        .map_err(|e| S3Error::Internal(e.to_string()))??;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        Ok((StatusCode::CONFLICT, "bucket not empty").into_response())
+    }
+}
+
+/// ListBuckets: every pot the store knows, created or written to.
+async fn list_buckets(State(st): State<S3State>) -> Result<Response, S3Error> {
+    let buckets = st.engine.list_buckets()?;
+    Ok(xml_response(list_buckets_xml(&buckets)))
+}
+
 /// S3 etags are quoted. Bad chars can't appear in a blake3 id, so this is safe.
 fn etag(object_id: &str) -> HeaderValue {
     HeaderValue::from_str(&format!("\"{object_id}\""))
@@ -448,6 +509,25 @@ fn complete_xml(bucket: &str, key: &str, object_id: &str) -> String {
         xml_escape(key),
         xml_escape(object_id),
     )
+}
+
+fn list_buckets_xml(buckets: &[String]) -> String {
+    // We don't record a per-pot creation time, so CreationDate is a fixed epoch
+    // placeholder. S3 clients require the field to be present and well-formed;
+    // they don't rely on its value.
+    let mut body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListAllMyBucketsResult xmlns=\"{XMLNS}\">\
+         <Owner><ID>barme</ID><DisplayName>barme</DisplayName></Owner><Buckets>"
+    );
+    for b in buckets {
+        body.push_str(&format!(
+            "<Bucket><Name>{}</Name><CreationDate>1970-01-01T00:00:00.000Z</CreationDate></Bucket>",
+            xml_escape(b),
+        ));
+    }
+    body.push_str("</Buckets></ListAllMyBucketsResult>");
+    body
 }
 
 fn list_parts_xml(bucket: &str, key: &str, upload_id: &str, parts: &[(u32, PartMeta)]) -> String {
@@ -720,5 +800,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    async fn status(app: &axum::Router, method: &str, uri: &str) -> StatusCode {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn create_head_list_delete_bucket() {
+        let app = app(state());
+
+        // Unknown pot: HeadBucket is 404.
+        assert_eq!(status(&app, "HEAD", "/reports").await, StatusCode::NOT_FOUND);
+
+        // Create it, idempotently.
+        assert_eq!(status(&app, "PUT", "/reports").await, StatusCode::OK);
+        assert_eq!(status(&app, "PUT", "/reports").await, StatusCode::OK);
+
+        // Now it exists.
+        assert_eq!(status(&app, "HEAD", "/reports").await, StatusCode::OK);
+
+        // And it shows up in ListBuckets.
+        let res = app
+            .clone()
+            .oneshot(Request::builder().method("GET").uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let xml = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&xml).contains("<Name>reports</Name>"));
+
+        // Empty pot deletes, then reads back as absent.
+        assert_eq!(status(&app, "DELETE", "/reports").await, StatusCode::NO_CONTENT);
+        assert_eq!(status(&app, "HEAD", "/reports").await, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_written_pot_lists_without_being_created() {
+        let app = app(state());
+        // A first write implies the pot; HeadBucket and ListBuckets both see it.
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/implied/note.txt")
+                    .body(Body::from(&b"hi"[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status(&app, "HEAD", "/implied").await, StatusCode::OK);
+        let res = app
+            .oneshot(Request::builder().method("GET").uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let xml = res.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&xml).contains("<Name>implied</Name>"));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_nonempty_pot_conflicts() {
+        let app = app(state());
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/full/doc.txt")
+                    .body(Body::from(&b"data"[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status(&app, "DELETE", "/full").await, StatusCode::CONFLICT);
     }
 }
