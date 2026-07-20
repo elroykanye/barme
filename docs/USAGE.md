@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.7.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:0.8.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -63,14 +63,17 @@ Roll back to an earlier version by its id:
 
 ## S3 API
 
-The S3 door handles object PUT, GET, DELETE, and HEAD with AWS SigV4. Point any S3 client at http://localhost:9000 with path-style addressing.
+The S3 door handles object PUT, GET, DELETE, and HEAD with AWS SigV4, the
+multipart upload sequence, and bucket create/head/delete plus ListBuckets. Point
+any S3 client at http://localhost:9000 with path-style addressing.
 
     aws configure set aws_access_key_id barme
     aws configure set aws_secret_access_key barme
+    aws --endpoint-url http://localhost:9000 s3 mb s3://photos
     aws --endpoint-url http://localhost:9000 s3 cp photo.jpg s3://photos/cat.jpg
     aws --endpoint-url http://localhost:9000 s3 cp s3://photos/cat.jpg out.jpg
 
-Bucket and object listing aren't on the S3 door yet; use the native `/pots` endpoints to list.
+Object listing (`GET /{pot}`, S3 ListObjects) isn't on the S3 door yet; use the native `/pots/{pot}/objects` endpoint to list a pot's contents.
 
 ## Config
 
