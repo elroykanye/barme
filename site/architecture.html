@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Architecture — how barme stores data</title>
+<meta name="description" content="The design behind barme: content-defined chunking, merkle manifests, self-describing objects, per-bucket compression, mark-and-sweep garbage collection, the S3 and native APIs, and a content-hash-keyed semantic layer.">
+<meta name="keywords" content="content-addressed storage design, merkle tree object store, FastCDC chunking, content-defined chunking, mark and sweep garbage collection, deduplication architecture, object manifest, semantic search vector index">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0c0e11">
+<link rel="canonical" href="https://elroykanye.github.io/barme/architecture.html">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="barme">
+<meta property="og:title" content="Architecture — how barme stores data">
+<meta property="og:description" content="Content-defined chunking, merkle manifests, self-describing objects, per-bucket compression, mark-and-sweep GC, and a content-hash-keyed semantic layer.">
+<meta property="og:url" content="https://elroykanye.github.io/barme/architecture.html">
+<meta property="og:image" content="https://elroykanye.github.io/barme/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Architecture — how barme stores data">
+<meta name="twitter:description" content="Content-defined chunking, merkle manifests, self-describing objects, per-bucket compression, mark-and-sweep GC, and a content-hash-keyed semantic layer.">
+<meta name="twitter:image" content="https://elroykanye.github.io/barme/og.png">
+
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "barme architecture",
+  "description": "The design behind barme: content-defined chunking, merkle manifests, self-describing objects, per-bucket compression, mark-and-sweep garbage collection, the two APIs, and the semantic layer.",
+  "url": "https://elroykanye.github.io/barme/architecture.html",
+  "about": { "@type": "SoftwareApplication", "name": "barme", "applicationCategory": "DeveloperApplication" },
+  "inLanguage": "en",
+  "isPartOf": { "@type": "WebSite", "name": "barme", "url": "https://elroykanye.github.io/barme/" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://elroykanye.github.io/barme/" },
+    { "@type": "ListItem", "position": 2, "name": "Architecture", "item": "https://elroykanye.github.io/barme/architecture.html" }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="./" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html#features" class="hide-sm">Features</a>
+      <a href="docs.html">Docs</a>
+      <a href="architecture.html">Architecture</a>
+      <a class="nav-gh" href="https://github.com/elroykanye/barme" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <div class="doc-shell">
+
+    <aside class="toc" aria-label="On this page">
+      <strong>On this page</strong>
+      <a href="#model">Model</a>
+      <a href="#blocks">The four building blocks</a>
+      <a href="#manifests">Object manifests</a>
+      <a href="#write">Write path</a>
+      <a href="#compression">Compression</a>
+      <a href="#gc">Garbage collection</a>
+      <a href="#apis">The two APIs</a>
+      <a href="#semantic">Semantic layer</a>
+      <a href="#tenancy">Multi-tenancy</a>
+      <strong>More</strong>
+      <a href="docs.html">Getting started</a>
+      <a href="https://github.com/elroykanye/barme" rel="noopener">Source on GitHub</a>
+    </aside>
+
+    <article class="doc-body">
+      <h1>Architecture</h1>
+      <p class="sub">How the storage engine, compression model, garbage collection, the two APIs, and the semantic layer fit together.</p>
+
+      <h2 id="model">Model</h2>
+      <p>One engine, two front doors.</p>
+      <pre><code>   S3 clients                     native clients
+        |                                |
+   [ S3 API ]                     [ native API ]
+        |                                |
+        +--------------+-----------------+
+                       |
+                  [ engine ]   chunks, manifests, merkle, GC
+                       |
+                  [ storage ]</code></pre>
+      <p>The engine is the whole system: content-defined chunking, hashing, merkle manifests, dedup, and garbage collection. The two APIs are translators in front of it. Neither holds storage logic of its own, which is what keeps them consistent. An object written through one door behaves identically through the other.</p>
+
+      <h2 id="blocks">The four building blocks</h2>
+      <p>Everything in the store is one of these, and each is addressed by its own hash.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Block</th><th>What it is</th><th>Addressed by</th></tr></thead>
+          <tbody>
+            <tr><td>Chunk</td><td>A slice of a file, cut by FastCDC</td><td><code>hash(chunk bytes)</code></td></tr>
+            <tr><td>Chunk list</td><td>Ordered list of chunk hashes that reassemble a file</td><td><code>hash(list)</code></td></tr>
+            <tr><td>Manifest</td><td>Record of how an object was stored; points at a chunk list</td><td><code>hash(manifest)</code> = the <code>object_id</code></td></tr>
+            <tr><td>Version pointer</td><td>A <code>bucket/key</code> label pointing at one manifest</td><td>mutable</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Everything is immutable and content-addressed except the version pointer. That single mutable label is the only thing that changes when an object is updated, which is what makes writes cheap and rollbacks trivial.</p>
+
+      <h2 id="manifests">Object manifests</h2>
+      <p>Every object carries a manifest describing exactly how it was stored. This is the keystone of the design: reads are driven by the manifest, never by the current server config.</p>
+      <pre><code>{
+  "manifest_version": 1,
+  "object_id": "blake3:9f2a...c71",
+  "created_at": "2026-07-16T10:22:04Z",
+  "original": {
+    "size_bytes": 26214400,
+    "sha256": "e3b0c4...",
+    "content_type": "image/jpeg"
+  },
+  "storage": {
+    "route": "image",
+    "fidelity": "exact",
+    "codec": "jxl",
+    "reconstructs_original": true
+  },
+  "chunking": { "algo": "fastcdc", "chunks": ["blake3:aa1", "blake3:bb2"] },
+  "tenant": "acme-corp",
+  "policy_snapshot": "photos-bucket@v3"
+}</code></pre>
+      <div class="callout">The operating rule: <strong>config is consulted only on write</strong>, to decide a new object's tier. Reads follow the object's own manifest. Change defaults next year or add a codec later, and everything already stored still restores, because each object carries its own instructions.</div>
+
+      <h2 id="write">Write path</h2>
+      <p>Uploading a 25 MB video, then a second version with the first few seconds edited:</p>
+      <pre><code>v1
+1. Chunk it       holiday.mp4 -> [C1][C2][C3][C4][C5]   (FastCDC, ~5 MB each)
+2. Hash chunks    C1->aa1  C2->bb2  C3->cc3  C4->dd4  C5->ee5
+3. Store new      all 5 are new -> all written
+4. Chunk list     [aa1,bb2,cc3,dd4,ee5] -> L100
+5. Manifest       {chunklist:L100, codec, fidelity, sha256} -> M900
+6. Move pointer   mybucket/holiday.mp4 -> M900
+
+v2 (start of file changed)
+2. Hash chunks    C1'->ff6 (new)   C2..C5 already stored
+3. Store new      only C1' written  (~5 MB, not 25)
+6. Move pointer   mybucket/holiday.mp4 -> M950   (M900 still exists)</code></pre>
+      <p>A 25 MB "new version" costs about 5 MB on disk. The old version is not destroyed; the pointer just moved. Because FastCDC cuts at boundaries chosen by the content itself, editing the start does not shift every later byte. An edit only disturbs the chunks it actually touches, which is why versioning and dedup work at all.</p>
+
+      <h2 id="compression">Compression</h2>
+      <p>Set per bucket, recorded per object. Two routes, picked by content type, because whole-file image codecs and content-defined chunking pull in opposite directions.</p>
+      <ul>
+        <li><strong>Blob route</strong> (backups, documents, archives): chunk with FastCDC, compress each chunk on its own, dedup at the chunk level. Whole-object integrity is a separate SHA-256 recorded in the manifest and checked on read.</li>
+        <li><strong>Image route</strong> (photos, media): treat the file as a whole, apply an image codec, dedup at the file level.</li>
+      </ul>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tier</th><th>Codec</th><th>Fidelity</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>zstd</td><td>exact</td><td>Default floor. Nothing stored uncompressed.</td></tr>
+            <tr><td>2</td><td>JPEG XL lossless transcode</td><td>exact</td><td>JPEGs 20-30% smaller, rebuildable byte for byte.</td></tr>
+            <tr><td>3</td><td>JPEG XL / AVIF lossy</td><td>perceptual</td><td>Visually identical, smaller, not byte-identical.</td></tr>
+            <tr><td>4</td><td>neural codecs</td><td>perceptual</td><td>Not in scope yet. The manifest leaves room for it.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Perceptual writes record a quality metric (SSIM / VMAF / Butteraugli) and score in the manifest, so "how faithful was this" is a stored fact, not a guess.</p>
+
+      <h2 id="gc">Garbage collection</h2>
+      <p>Chunks are shared, so deleting an object cannot mean erasing its chunks. Some may belong to other objects or versions. barme uses <strong>mark-and-sweep with a grace period</strong>, not reference counting. Reference counting keeps a second copy of the truth that drifts under crashes and concurrency, and drift there means silent data loss. Mark-and-sweep re-derives reachability from the live pointers each pass, so it is self-correcting.</p>
+      <pre><code>MARK   From a snapshot of every live version pointer, walk
+       pointer -> manifest -> chunk list -> chunks, marking each reachable.
+
+SWEEP  Any chunk not marked is unreachable. Condemn it (stamp condemned_at),
+       don't erase it yet.
+
+ERASE  A later pass deletes chunks condemned longer than the grace window
+       that are still unreachable.</code></pre>
+      <p>The dangerous case is a chunk unreferenced during MARK that gets reused by a concurrent upload before SWEEP. Defenses: a grace period (condemned chunks are not erased for a window, and any write referencing one clears the stamp), write-then-reference ordering, and snapshot roots so a pointer moving mid-sweep cannot hide a manifest.</p>
+
+      <h2 id="apis">The two APIs</h2>
+      <h3>S3 API</h3>
+      <p>The bucket/key/object model maps almost directly onto bucket/pointer/manifest: PUT chunks and moves the pointer, GET reassembles and verifies, DELETE clears the pointer (chunks reclaimed later by GC, never inline), HEAD reads the manifest with the content hash as etag, and multipart assembles a chunk list from parts.</p>
+      <h3>Native API</h3>
+      <p>Exposes what S3 has no vocabulary for: the full version graph with diffs that return only the chunks that differ, fetch-any-object-or-chunk by hash, tree-based sync, manifest and fidelity introspection, and semantic retrieval.</p>
+
+      <h2 id="semantic">Semantic layer</h2>
+      <p>A vector index keyed by content hash, storing what an object means alongside where its bytes live. The content hash is the join key between the two.</p>
+      <ul>
+        <li><strong>Off the write path.</strong> Understanding is enqueued after the pointer moves and runs asynchronously. Uploads never wait on it.</li>
+        <li><strong>Routed by content type.</strong> Images get a vision embedding plus optional caption/OCR; audio and video get transcripts plus embeddings; documents get text embeddings; opaque blobs are skipped.</li>
+        <li><strong>Deduplicated by hashing.</strong> The same content is embedded once. The trick that dedups bytes dedups the GPU work too.</li>
+        <li><strong>Derived and disposable.</strong> Every embedding can be rebuilt from the stored bytes. Losing the index is a rebuild, not data loss.</li>
+      </ul>
+      <p>The index runs as a separate optional service the engine talks to, since vector search has different memory and hardware needs than byte storage. It stays an index over the store, never a source of truth.</p>
+
+      <h2 id="tenancy">Multi-tenancy</h2>
+      <ul>
+        <li><strong>Keyed deduplication.</strong> Content-defined chunking can leak whether a chunk already exists, which lets one tenant probe for another's data. Dedup is scoped per tenant with a keyed hash, so chunks only dedup within a tenant.</li>
+        <li><strong>Scoped search.</strong> The semantic index carries the tenant and filters on it before nearest-neighbor, so search never crosses tenant boundaries.</li>
+      </ul>
+
+      <p style="margin-top:40px">Ready to run it? Head to <a href="docs.html">Getting started</a> or read the <a href="https://github.com/elroykanye/barme/blob/main/docs/ARCHITECTURE.md" rel="noopener">full architecture notes</a> on GitHub.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap foot-row">
+    <a class="brand" href="./" style="font-size:17px" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" style="width:20px;height:20px"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <a href="docs.html">Docs</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/elroykanye/barme" rel="noopener">GitHub</a>
+    <a href="https://github.com/elroykanye/barme/releases" rel="noopener">Releases</a>
+    <span class="spacer">MIT licensed · © elroykanye</span>
+  </div>
+</footer>
+
+<script>
+  (function () { var k='barme-theme'; try{var s=localStorage.getItem(k); if(s)document.documentElement.setAttribute('data-theme',s);}catch(e){} })();
+</script>
+</body>
+</html>

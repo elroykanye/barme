@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>barme — content-addressed, S3-compatible object store</title>
+<meta name="description" content="barme is an open-source, self-hostable object store that speaks the S3 API. It stores objects by content hash for automatic deduplication, cheap versioning, integrity-checked reads, and efficient sync. A lightweight single-binary MinIO alternative written in Rust.">
+<meta name="keywords" content="object store, S3-compatible, content-addressed storage, deduplication, MinIO alternative, self-hosted S3, Rust storage engine, merkle tree storage, versioned object storage, semantic search storage">
+<meta name="author" content="elroykanye">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0c0e11">
+<link rel="canonical" href="https://elroykanye.github.io/barme/">
+
+<!-- Open Graph -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="barme">
+<meta property="og:title" content="barme — content-addressed object store that speaks S3">
+<meta property="og:description" content="Open-source, self-hostable object storage. Stores by content hash for dedup, cheap versioning, integrity by default, and efficient sync. A single-binary S3 alternative in Rust.">
+<meta property="og:url" content="https://elroykanye.github.io/barme/">
+<meta property="og:image" content="https://elroykanye.github.io/barme/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="barme — a content-addressed object store that speaks S3">
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="barme — content-addressed object store that speaks S3">
+<meta name="twitter:description" content="Open-source, self-hostable object storage with content-addressed dedup, cheap versioning, and integrity by default. A single-binary S3 alternative in Rust.">
+<meta name="twitter:image" content="https://elroykanye.github.io/barme/og.png">
+
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://elroykanye.github.io/barme/#website",
+      "url": "https://elroykanye.github.io/barme/",
+      "name": "barme",
+      "description": "Content-addressed, S3-compatible object store."
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "barme",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, Windows, Docker, Kubernetes",
+      "softwareVersion": "0.7.0",
+      "description": "An open-source, self-hostable object store that speaks the S3 API and stores objects by content hash for deduplication, cheap versioning, integrity-checked reads, and efficient sync.",
+      "url": "https://elroykanye.github.io/barme/",
+      "downloadUrl": "https://github.com/elroykanye/barme/releases",
+      "codeRepository": "https://github.com/elroykanye/barme",
+      "programmingLanguage": "Rust",
+      "license": "https://opensource.org/licenses/MIT",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Is barme compatible with the S3 API?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Yes. barme exposes an S3-compatible API with AWS SigV4 auth for PUT, GET, DELETE, HEAD, listing, and multipart uploads, so existing S3 clients and SDKs work by pointing at its endpoint with path-style addressing." }
+        },
+        {
+          "@type": "Question",
+          "name": "How does barme deduplicate data?",
+          "acceptedAnswer": { "@type": "Answer", "text": "barme splits each upload into content-defined chunks and addresses every chunk by its hash. Identical chunks share a hash and are stored once across every object and every version, so duplicate data is never written twice." }
+        },
+        {
+          "@type": "Question",
+          "name": "Is barme a MinIO alternative?",
+          "acceptedAnswer": { "@type": "Answer", "text": "barme is a self-hostable, single-binary object store with an S3-compatible API, so it fills a similar role to MinIO. It adds content-addressed storage, deduplication, cheap versioning, per-bucket compression, and semantic search over object contents." }
+        }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="./" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#features" class="hide-sm">Features</a>
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="docs.html">Docs</a>
+      <a href="architecture.html" class="hide-sm">Architecture</a>
+      <a class="nav-gh" href="https://github.com/elroykanye/barme" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero">
+    <div class="wrap">
+      <span class="badge">● Alpha · v0.7.0 · MIT licensed</span>
+      <h1>The object store that stores by <span class="grad">content</span>, not filename.</h1>
+      <p class="lede">barme speaks the S3 API, then goes further. Every object is split into content-addressed chunks, so you get deduplication, cheap versioning, and integrity-checked reads without extra machinery. Self-hostable, single binary, written in Rust.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="docs.html">Get started</a>
+        <a class="btn btn-ghost" href="https://github.com/elroykanye/barme" rel="noopener">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          Star on GitHub
+        </a>
+      </div>
+
+      <div class="code-card">
+        <div class="code-head"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span style="margin-left:6px">run barme with Docker</span></div>
+        <pre><code>docker run -p 7373:7373 -p 7374:7374 \
+  -p 7375:7375 -p 9000:9000 \
+  -v barme:/data elroykanye/barme:0.7.0</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="features" class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Storage properties, for free</h2>
+        <p>Addressing objects by their content hash gives you the things you usually bolt on later.</p>
+      </div>
+      <div class="grid">
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="8.5" y="14" width="7" height="7" rx="1"/></svg></div>
+          <h3>Deduplication</h3>
+          <p>Identical chunks share a hash and are stored once, across every object and every version. No duplicate bytes hit disk.</p>
+        </article>
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></div>
+          <h3>Cheap versioning</h3>
+          <p>A new version only writes the chunks that changed. A 25 MB re-upload with an edited header can cost about 5 MB on disk. Old versions stay intact and addressable.</p>
+        </article>
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+          <h3>Integrity by default</h3>
+          <p>Reads are verified against their hash. A corrupted byte is caught on access instead of surfacing later as silent data loss.</p>
+        </article>
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 12a8 8 0 0114-5M20 12a8 8 0 01-14 5"/><path d="M17 3v4h-4M7 21v-4h4"/></svg></div>
+          <h3>Efficient sync</h3>
+          <p>Two nodes reconcile by comparing merkle tree roots and transferring only the branches that differ. Prove a chunk belongs to an object without shipping the whole thing.</p>
+        </article>
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 8v8a2 2 0 01-1 1.73l-7 4a2 2 0 01-2 0l-7-4A2 2 0 013 16V8a2 2 0 011-1.73l7-4a2 2 0 012 0l7 4A2 2 0 0121 8z"/><path d="M3.3 7L12 12l8.7-5M12 22V12"/></svg></div>
+          <h3>Per-bucket compression</h3>
+          <p>From byte-exact zstd to JPEG XL lossless transcode (JPEGs 20-30% smaller, rebuildable byte for byte) to visually-lossless AVIF. Set per bucket, recorded per object.</p>
+        </article>
+        <article class="card">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></div>
+          <h3>Semantic search</h3>
+          <p>Query objects by meaning, text or image, over a vector index keyed by content hash. Built asynchronously off the write path, per-tenant isolated, and rebuildable from the stored bytes.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>How a write works</h2>
+        <p>An object is a merkle tree of content hashes, roughly how git handles blobs.</p>
+      </div>
+      <div class="steps">
+        <div class="step"><div class="n">1</div><h3>Chunk</h3><p>The file is split into content-defined chunks with FastCDC, so a local edit only disturbs the chunks it touches.</p></div>
+        <div class="step"><div class="n">2</div><h3>Hash &amp; dedup</h3><p>Every chunk is addressed by its hash. Chunks already in the store are skipped; only new bytes are written.</p></div>
+        <div class="step"><div class="n">3</div><h3>Manifest</h3><p>A manifest records the chunk list, codec, fidelity, and quality. Its hash is the object id, the merkle root.</p></div>
+        <div class="step"><div class="n">4</div><h3>Move pointer</h3><p>A mutable bucket/key label points at the manifest. Rolling back is just pointing it at an older one.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="alt">
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Two doors, one engine</h2>
+        <p>An object written over S3 can be inspected, diffed, and searched through the native API, because both call the same engine.</p>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr))">
+        <article class="card">
+          <h3>S3 API <span style="color:var(--fg-faint);font-weight:400">· port 9000</span></h3>
+          <p>Object PUT, GET, DELETE, HEAD, listing, multipart, and presigned URLs with AWS SigV4. Point any S3 client or SDK at it with path-style addressing.</p>
+        </article>
+        <article class="card">
+          <h3>Native API <span style="color:var(--fg-faint);font-weight:400">· port 7373</span></h3>
+          <p>The operations S3 has no vocabulary for: version diffs, fetch-by-hash, tree-based sync, fidelity introspection, and semantic search.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <h2>Compression tiers</h2>
+        <p>Nothing is ever stored uncompressed. Each object records how it was stored, so defaults can change without orphaning old data.</p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tier</th><th>Codec</th><th>Fidelity</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><code>zstd</code></td><td>Exact</td><td>Default floor. Original bytes reconstructed exactly.</td></tr>
+            <tr><td>2</td><td>JPEG XL lossless transcode</td><td>Exact</td><td>JPEGs 20-30% smaller, rebuildable byte for byte.</td></tr>
+            <tr><td>3</td><td>JPEG XL / AVIF lossy</td><td>Perceptual</td><td>Visually identical, smaller, not byte-identical.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta-band">
+    <div class="wrap">
+      <div class="inner">
+        <h2>Run it in one command</h2>
+        <p>Grab a binary, pull the Docker image, or install the Helm chart. No default login, secrets encrypted at rest.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="docs.html">Read the docs</a>
+          <a class="btn btn-ghost" href="https://github.com/elroykanye/barme/releases" rel="noopener">Download a release</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap foot-row">
+    <a class="brand" href="./" style="font-size:17px" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" style="width:20px;height:20px"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <a href="docs.html">Docs</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/elroykanye/barme" rel="noopener">GitHub</a>
+    <a href="https://github.com/elroykanye/barme/releases" rel="noopener">Releases</a>
+    <span class="spacer">MIT licensed · © elroykanye</span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var k = 'barme-theme';
+    try { var s = localStorage.getItem(k); if (s) document.documentElement.setAttribute('data-theme', s); } catch (e) {}
+  })();
+</script>
+</body>
+</html>

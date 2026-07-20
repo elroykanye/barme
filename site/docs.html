@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Getting started — barme docs</title>
+<meta name="description" content="Install and run barme, store and read objects over the native and S3 APIs, manage versions and integrity, configure buckets and compression, handle credentials, and sync between instances.">
+<meta name="keywords" content="barme docs, S3-compatible object store setup, self-hosted S3, docker object storage, object versioning, content-addressed storage tutorial">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0c0e11">
+<link rel="canonical" href="https://elroykanye.github.io/barme/docs.html">
+
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="barme">
+<meta property="og:title" content="Getting started — barme docs">
+<meta property="og:description" content="Install and run barme, store and read objects over the S3 and native APIs, version, configure, and sync.">
+<meta property="og:url" content="https://elroykanye.github.io/barme/docs.html">
+<meta property="og:image" content="https://elroykanye.github.io/barme/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Getting started — barme docs">
+<meta name="twitter:description" content="Install and run barme, store and read objects over the S3 and native APIs, version, configure, and sync.">
+<meta name="twitter:image" content="https://elroykanye.github.io/barme/og.png">
+
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Getting started with barme",
+  "description": "Install and run barme, store and read objects over the S3 and native APIs, manage versions and integrity, configure buckets and compression, and sync between instances.",
+  "url": "https://elroykanye.github.io/barme/docs.html",
+  "about": { "@type": "SoftwareApplication", "name": "barme", "applicationCategory": "DeveloperApplication" },
+  "inLanguage": "en",
+  "isPartOf": { "@type": "WebSite", "name": "barme", "url": "https://elroykanye.github.io/barme/" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://elroykanye.github.io/barme/" },
+    { "@type": "ListItem", "position": 2, "name": "Docs", "item": "https://elroykanye.github.io/barme/docs.html" }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap nav">
+    <a class="brand" href="./" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html#features" class="hide-sm">Features</a>
+      <a href="docs.html">Docs</a>
+      <a href="architecture.html" class="hide-sm">Architecture</a>
+      <a class="nav-gh" href="https://github.com/elroykanye/barme" rel="noopener">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="main" class="wrap">
+  <div class="doc-shell">
+
+    <aside class="toc" aria-label="On this page">
+      <strong>On this page</strong>
+      <a href="#run">Run it</a>
+      <a href="#ports">Ports</a>
+      <a href="#store">Store and read an object</a>
+      <a href="#versions">Versions and integrity</a>
+      <a href="#s3">S3 API</a>
+      <a href="#config">Config</a>
+      <a href="#credentials">Credentials</a>
+      <a href="#sync">Sync between instances</a>
+      <a href="#k8s">Kubernetes</a>
+      <strong>More</strong>
+      <a href="architecture.html">Architecture</a>
+      <a href="https://github.com/elroykanye/barme" rel="noopener">Source on GitHub</a>
+    </aside>
+
+    <article class="doc-body">
+      <h1>Getting started</h1>
+      <p class="sub">Install barme, store and read your first object, then version, configure, and sync it.</p>
+
+      <h2 id="run">Run it</h2>
+      <p>With Docker:</p>
+      <pre><code>docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
+  -v barme:/data elroykanye/barme:0.7.0</code></pre>
+      <p>Or download a <code>barmed</code> binary from the <a href="https://github.com/elroykanye/barme/releases" rel="noopener">releases</a> and run <code>./barmed</code>. From source: <code>cargo run -p barmed --features ui</code>.</p>
+      <div class="callout">The console is at <code>http://localhost:7374</code>. There is no default login. On first start with no credential configured, barme mints a random owner (access key <code>barme</code>, a random secret) and prints it once in the startup output. Copy it then, or set your own with <code>BARME_ACCESS_KEY</code> and <code>BARME_SECRET_KEY</code>.</div>
+
+      <h2 id="ports">Ports</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Port</th><th>Door</th></tr></thead>
+          <tbody>
+            <tr><td><code>7373</code></td><td>Native JSON API</td></tr>
+            <tr><td><code>7374</code></td><td>Web console</td></tr>
+            <tr><td><code>7375</code></td><td>CDN (public and by-hash delivery)</td></tr>
+            <tr><td><code>9000</code></td><td>S3 API</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="store">Store and read an object</h2>
+      <p>The native API is JSON over HTTP with Basic auth. A <strong>pot</strong> is a container; it is created the first time you write to it.</p>
+      <p>Upload:</p>
+      <pre><code>curl -u barme:barme -T photo.jpg -H "Content-Type: image/jpeg" \
+  http://localhost:7373/objects/photos/cat.jpg</code></pre>
+      <p>Download:</p>
+      <pre><code>curl -u barme:barme http://localhost:7373/objects/photos/cat.jpg -o cat.jpg</code></pre>
+      <p>List pots, then objects in a pot:</p>
+      <pre><code>curl -u barme:barme http://localhost:7373/pots
+curl -u barme:barme http://localhost:7373/pots/photos/objects</code></pre>
+      <p>Delete:</p>
+      <pre><code>curl -u barme:barme -X DELETE http://localhost:7373/objects/photos/cat.jpg</code></pre>
+      <p>The full endpoint list is served at <code>http://localhost:7373/docs</code>.</p>
+
+      <h2 id="versions">Versions and integrity</h2>
+      <p>Every write keeps the previous version. Nothing is overwritten in place.</p>
+      <pre><code>curl -u barme:barme http://localhost:7373/history/photos/cat.jpg    # version ids
+curl -u barme:barme http://localhost:7373/manifest/photos/cat.jpg   # how it was stored
+curl -u barme:barme -X POST http://localhost:7373/verify/photos/cat.jpg   # re-hash check</code></pre>
+      <p>Roll back to an earlier version by its id:</p>
+      <pre><code>curl -u barme:barme -X POST http://localhost:7373/restore/photos/cat.jpg \
+  -H 'content-type: application/json' -d '{"object_id":"blake3:..."}'</code></pre>
+
+      <h2 id="s3">S3 API</h2>
+      <p>The S3 door handles object PUT, GET, DELETE, and HEAD with AWS SigV4. Point any S3 client at <code>http://localhost:9000</code> with path-style addressing.</p>
+      <pre><code>aws configure set aws_access_key_id barme
+aws configure set aws_secret_access_key barme
+aws --endpoint-url http://localhost:9000 s3 cp photo.jpg s3://photos/cat.jpg
+aws --endpoint-url http://localhost:9000 s3 cp s3://photos/cat.jpg out.jpg</code></pre>
+      <div class="callout">Bucket and object listing are not on the S3 door yet; use the native <code>/pots</code> endpoints to list.</div>
+
+      <h2 id="config">Config</h2>
+      <p>barme runs on defaults with no config. To change them, put a <code>barme.toml</code> next to the binary, or point at one with <code>--config</code> or <code>BARME_CONFIG</code>:</p>
+      <pre><code>data_dir     = "./barme-data"
+native_addr  = "0.0.0.0:7373"
+s3_addr      = "0.0.0.0:9000"
+cdn_addr     = "0.0.0.0:7375"
+console_addr = "0.0.0.0:7374"
+# Largest accepted single object, in bytes. Uploads stream (memory stays
+# flat), so this is a size ceiling, not a memory one. Default 512 MiB.
+max_upload_bytes = 536870912
+# Browser origins allowed to call the API and CDN doors. Default ["*"].
+cors_origins = ["https://console.example.com"]
+
+[credentials]
+access_key = "barme"
+secret_key = "change-me"
+
+[default_policy]
+codec      = "zstd"   # or "none"
+zstd_level = 0        # 0 = zstd's default level
+
+# Optional semantic search: point at your own embedder.
+# embed_url   = "http://localhost:11434/api/embeddings"
+# embed_model = "nomic-embed-text"</code></pre>
+      <p>Environment variables override the file: <code>BARME_DATA_DIR</code>, <code>BARME_ACCESS_KEY</code>, <code>BARME_SECRET_KEY</code>, <code>BARME_MASTER_KEY</code>, <code>BARME_EMBED_URL</code>, <code>BARME_EMBED_MODEL</code>, <code>BARME_MAX_UPLOAD_BYTES</code>. If a port is already taken, barme rolls forward to the next free one.</p>
+
+      <h2 id="credentials">Credentials and the master key</h2>
+      <p>There is no default login. On first start with none configured, barme mints a random owner and prints it once. Set <code>BARME_ACCESS_KEY</code> / <code>BARME_SECRET_KEY</code> (or <code>[credentials]</code> in <code>barme.toml</code>) to use your own.</p>
+      <p>Access-key secrets are encrypted at rest (AES-256-GCM), not stored in plaintext. The S3 door verifies AWS SigV4, which needs the raw secret to recompute the signature, so the server keeps a recoverable but encrypted copy. The encryption key (the master key) is resolved in this order:</p>
+      <ol>
+        <li><code>BARME_MASTER_KEY</code> — 64 hex characters (32 bytes). Best for real deployments. Generate one with <code>openssl rand -hex 32</code>.</li>
+        <li><code>&lt;data_dir&gt;/master.key</code> — created <code>0600</code> on first boot if you did not set the env var.</li>
+        <li>Otherwise generated fresh on first boot and announced in the log.</li>
+      </ol>
+      <div class="callout"><strong>Back the master key up.</strong> Encrypted secrets cannot be recovered without it.</div>
+      <p>Per-pot settings (compression, public read, lifecycle) are set over the API:</p>
+      <pre><code>curl -u KEY:SECRET -X PUT http://localhost:7373/pots/photos/config \
+  -H 'content-type: application/json' -d '{"public_read": true, "codec": "zstd"}'</code></pre>
+
+      <h2 id="sync">Sync between two instances</h2>
+      <p>barme replicates an object by transferring only the chunks the far side does not already have. Given a source <code>S</code> and destination <code>D</code> (both owner-authed), to copy object <code>blake3:ID</code>:</p>
+      <pre><code># 1. ask S for the manifest and which chunks D is missing
+curl -u barme:barme -X POST http://S:7373/sync/plan \
+  -H 'content-type: application/json' \
+  -d '{"object_id": "blake3:ID", "have": []}'
+#    -> { "manifest": {...}, "missing": ["blake3:...", ...] }
+
+# 2. copy each missing chunk S -> D (re-verified by hash on receipt)
+curl -u barme:barme http://S:7373/chunk/blake3:H | \
+  curl -u barme:barme -T - http://D:7373/chunk/blake3:H
+
+# 3. adopt the manifest on D; it now serves the object
+curl -u barme:barme -X POST http://D:7373/sync/import/photos/cat.jpg \
+  -H 'content-type: application/json' -d @manifest.json</code></pre>
+      <p>Prove a specific chunk belongs to an object, without shipping the whole object:</p>
+      <pre><code>curl -u barme:barme "http://localhost:7373/proof/photos/cat.jpg?index=0"</code></pre>
+
+      <h2 id="k8s">Kubernetes</h2>
+      <p>The Helm chart runs a single-node store with a persistent volume and credentials in a Secret:</p>
+      <pre><code>helm install barme ./charts/barme</code></pre>
+      <p>See the <a href="https://github.com/elroykanye/barme/tree/main/charts/barme" rel="noopener">chart README</a> for values and ingress, and <a href="architecture.html">Architecture</a> for the design and on-disk layout.</p>
+    </article>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap foot-row">
+    <a class="brand" href="./" style="font-size:17px" aria-label="barme home">
+      <svg viewBox="0 0 32 32" aria-hidden="true" style="width:20px;height:20px"><g stroke="var(--accent)" stroke-width="1.8" stroke-linecap="round"><path d="M16 9 L9 19 M16 9 L23 19 M16 9 L16 19" fill="none"/></g><g fill="var(--accent)"><circle cx="16" cy="8" r="3"/><circle cx="9" cy="21" r="3"/><circle cx="16" cy="21" r="3"/><circle cx="23" cy="21" r="3"/></g></svg>
+      barme
+    </a>
+    <a href="docs.html">Docs</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="https://github.com/elroykanye/barme" rel="noopener">GitHub</a>
+    <a href="https://github.com/elroykanye/barme/releases" rel="noopener">Releases</a>
+    <span class="spacer">MIT licensed · © elroykanye</span>
+  </div>
+</footer>
+
+<script>
+  (function () { var k='barme-theme'; try{var s=localStorage.getItem(k); if(s)document.documentElement.setAttribute('data-theme',s);}catch(e){} })();
+</script>
+</body>
+</html>
