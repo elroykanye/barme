@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.s3Host }}
+{{- fail "ingress.enabled is true but ingress.s3Host is empty" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "barme.fullname" . }}
+  labels:
+    {{- include "barme.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    # Routes the host straight to the S3 door with NO path rewrite: an S3 SigV4
+    # signature covers the request path, so any prefix strip breaks every request.
+    - host: {{ .Values.ingress.s3Host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "barme.fullname" . }}
+                port:
+                  number: {{ .Values.service.ports.s3 }}
+{{- end }}

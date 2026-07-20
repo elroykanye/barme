@@ -1,0 +1,84 @@
+# Default values for the barme chart.
+
+image:
+  repository: elroykanye/barme
+  # Pin to a release. Blank falls back to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Owner credential and the at-rest encryption master key.
+#
+# barme encrypts access-key secrets at rest with a 32-byte master key, and mints
+# an owner credential on first boot if none is set. This chart manages all three
+# in a Secret so they are deterministic and retrievable: any value left blank is
+# generated once on first install and preserved across upgrades (the chart reads
+# the existing Secret back). Set them explicitly for real deployments, or point
+# existingSecret at a Secret you manage yourself.
+auth:
+  # Owner access key. Blank -> generated (barme-XXXX...).
+  accessKey: ""
+  # Owner secret key. Blank -> generated.
+  secretKey: ""
+  # 64 hex chars (32 bytes). Blank -> generated. Losing this makes stored
+  # key secrets unrecoverable, so back up the Secret.
+  masterKey: ""
+  # Use a Secret you manage instead of the chart-managed one. It must carry the
+  # keys BARME_ACCESS_KEY, BARME_SECRET_KEY, BARME_MASTER_KEY.
+  existingSecret: ""
+
+persistence:
+  enabled: true
+  size: 20Gi
+  # "" uses the cluster's default StorageClass.
+  storageClass: ""
+  accessMode: ReadWriteOnce
+
+service:
+  type: ClusterIP
+  ports:
+    s3: 9000
+    api: 7373
+    cdn: 7375
+    console: 7374
+
+# Optional ingress for the S3 door. Off by default. IMPORTANT: an S3 SigV4
+# signature covers the request path, so the ingress must route without any path
+# rewrite or prefix strip, or every signed request fails.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Host that routes to the S3 port.
+  s3Host: ""
+  tls: []
+  #  - secretName: barme-s3-tls
+  #    hosts:
+  #      - s3.example.com
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Extra environment for the container, e.g. BARME_EMBED_URL to turn on semantic
+# search, or BARME_EMBED_MODEL.
+extraEnv: {}
+
+podAnnotations: {}
+
+# The stock image runs barmed as root. fsGroup keeps the data volume writable if
+# you later run it non-root.
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
