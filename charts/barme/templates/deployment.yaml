@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "barme.fullname" . }}
+  labels:
+    {{- include "barme.labels" . | nindent 4 }}
+spec:
+  # barme is a single-node store. Do not scale horizontally; a second replica
+  # would bind a second copy of the same data dir (RWO) and diverge.
+  replicas: 1
+  strategy:
+    # The data volume is ReadWriteOnce, so the old pod must release it before
+    # the new one can mount it. A rolling update would deadlock on the PVC.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "barme.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "barme.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: barme
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: BARME_DATA_DIR
+              value: /data
+            - name: BARME_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "barme.secretName" . }}
+                  key: BARME_ACCESS_KEY
+            - name: BARME_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "barme.secretName" . }}
+                  key: BARME_SECRET_KEY
+            - name: BARME_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "barme.secretName" . }}
+                  key: BARME_MASTER_KEY
+            {{- range $k, $v := .Values.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: api
+              containerPort: 7373
+            - name: cdn
+              containerPort: 7375
+            - name: console
+              containerPort: 7374
+          # /health lives on the native (api) door.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "barme.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

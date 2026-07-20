@@ -94,6 +94,13 @@ door, Basic on the native door). Set your own with `BARME_ACCESS_KEY` and
 search. Config, ports, and the full API are covered in
 [`docs/USAGE.md`](docs/USAGE.md).
 
+On Kubernetes, the Helm chart in [`charts/barme`](charts/barme) runs a
+single-node store with a persistent volume and credentials in a Secret:
+
+    helm install barme ./charts/barme
+
+See [`charts/barme/README.md`](charts/barme/README.md) for values and ingress.
+
 ## Documentation
 
 - [`docs/USAGE.md`](docs/USAGE.md) — getting started, API, config, sync.

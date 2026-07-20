@@ -1,0 +1,30 @@
+barme is deployed as {{ include "barme.fullname" . }}.
+
+Doors (in-cluster, via the Service):
+  S3       {{ include "barme.fullname" . }}:{{ .Values.service.ports.s3 }}
+  API      {{ include "barme.fullname" . }}:{{ .Values.service.ports.api }}   (/health, /stats, /metrics, /docs)
+  CDN      {{ include "barme.fullname" . }}:{{ .Values.service.ports.cdn }}
+  Console  {{ include "barme.fullname" . }}:{{ .Values.service.ports.console }}
+
+{{- if not .Values.auth.existingSecret }}
+
+Owner credential and master key are in the Secret {{ include "barme.secretName" . }}:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "barme.secretName" . }} \
+    -o jsonpath='{.data.BARME_ACCESS_KEY}' | base64 -d; echo
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "barme.secretName" . }} \
+    -o jsonpath='{.data.BARME_SECRET_KEY}' | base64 -d; echo
+
+Back up that Secret. The master key decrypts stored access-key secrets; lose it
+and they are unrecoverable.
+{{- end }}
+
+Try it from your machine:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "barme.fullname" . }} {{ .Values.service.ports.s3 }}:{{ .Values.service.ports.s3 }}
+  # then point any S3 client at http://localhost:{{ .Values.service.ports.s3 }} with the credential above.
+
+{{- if .Values.ingress.enabled }}
+
+S3 is exposed at: https://{{ .Values.ingress.s3Host }}
+{{- end }}
