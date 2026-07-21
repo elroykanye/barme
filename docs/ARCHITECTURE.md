@@ -1,6 +1,6 @@
 # Barme Architecture
 
-Design notes for the storage engine, the compression model, garbage collection, the two APIs, and the semantic layer. This is a design document, not a description of running code. Nothing here is built yet.
+Design notes for the storage engine, the compression model, garbage collection, the two APIs, and the semantic layer. This describes the design as built: barme shipped **v1.0** with the on-disk format and API frozen (see [STABILITY.md](STABILITY.md)). A few pieces below are still design-only or experimental — semantic search, image/perceptual codecs, and cross-node distribution — and are flagged where they appear.
 
 ## Contents
 
@@ -13,6 +13,7 @@ Design notes for the storage engine, the compression model, garbage collection, 
 - [The two APIs](#the-two-apis)
 - [Semantic layer](#semantic-layer)
 - [Multi-tenancy](#multi-tenancy)
+- [Distribution (v2)](#distribution-v2)
 - [Open questions](#open-questions)
 
 ## Model
@@ -84,6 +85,10 @@ Notable fields:
 - `policy_snapshot` — which bucket policy was active at write time. This is what lets config drift over time without breaking stored data.
 
 The operating rule: **config is consulted only on write, to decide a new object's tier. Reads follow the object's own manifest.** Change defaults next year or add a codec in a later version, and everything already stored still restores, because each object carries its own instructions.
+
+### On-disk format and compatibility
+
+The data directory carries a `format.json` stamping the layout version, and every manifest carries its `manifest_version`. On open, a directory or object written by a *newer* barme is refused rather than misread; an older format runs a migration and is rewritten. That version stamp plus the manifest's self-description is what lets 1.x evolve the layout without orphaning data written by an earlier 1.x — the compatibility contract is spelled out in [STABILITY.md](STABILITY.md). Access-key secrets are the one recoverable thing that isn't public: they're encrypted at rest (AES-256-GCM) under a master key, since the S3 door verifies SigV4 and needs the raw secret to check a signature. Object *contents* are not encrypted.
 
 ## Write path
 
@@ -171,22 +176,22 @@ The bucket/key/object model maps almost directly onto bucket/pointer/manifest.
 | `PUT bucket/key` | chunk, dedup, write new chunks, manifest, move pointer |
 | `GET bucket/key` | pointer -> manifest -> reassemble -> decompress per manifest -> verify -> serve |
 | `DELETE bucket/key` | move/clear the pointer; chunks reclaimed later by GC, never inline |
-| `HEAD bucket/key` | read manifest; etag is the content hash |
-| `ListObjects` | list pointers in the bucket |
-| `GET ?versionId=` | resolve to a specific manifest |
-| Multipart | each part is a batch of chunks; completion assembles the chunk list |
+| `HEAD bucket/key` | read manifest; etag is the content hash; `X-Barme-Object-Id` carries the content id |
+| Multipart | each part is a batch of chunks; completion re-hashes and assembles one manifest |
+| `PUT/HEAD/DELETE bucket`, `GET /` | create / head / delete a pot; ListBuckets |
 
-Scope: implement the parts real clients use (`PUT/GET/DELETE/HEAD/List`, multipart, presigned URLs) first. The long tail of bucket sub-resources can come later.
+Implemented as of v1.0: object `PUT/GET/DELETE/HEAD`, the full multipart sequence, and bucket create/head/delete plus ListBuckets, all with AWS SigV4. Not yet on the S3 door, tracked for 1.1: `ListObjects` (`GET bucket?list-type=2`), `?versionId` reads, and presigned query-string URLs — barme's own share links already cover time-limited delivery through the CDN door. The long tail of bucket sub-resources (ACLs, lifecycle, policies) comes later.
 
 ### Native API
 
-Exposes what S3 has no vocabulary for:
+Exposes what S3 has no vocabulary for. The live, authoritative reference is served at `/docs`; the highlights:
 
-- `GET /objects/{key}/history` — the full version graph, diffable. Diffing two versions returns only the chunks that differ.
+- `GET /history/{pot}/{key}` — the full version graph, diffable; `/diff` returns only the chunks that differ, `/restore` rolls the pointer back.
+- `GET /manifest/{pot}/{key}` — fidelity, codec, quality: is this object exact or perceptual, and how faithful. `POST /verify` re-hashes it against its manifest.
 - `GET /content/{hash}` — fetch any object or chunk directly by hash.
-- `POST /sync` — send local tree roots, get back the subtrees you're missing.
-- `GET /objects/{key}/manifest` — fidelity, codec, quality. Ask whether an object is exact or perceptual and how faithful.
-- `POST /search` — semantic retrieval (see below).
+- Sync: `POST /sync/plan` (manifest + missing chunks), `GET/PUT /chunk/{hash}`, `POST /sync/import/{pot}/{key}`, plus `/proof` and `/delta` — the content-addressed replication primitives (see [Distribution](#distribution-v2)). *(experimental)*
+- `POST /search`, `POST /similar/{hash}` — semantic retrieval (see below). *(experimental)*
+- Ops: `/health` (liveness), `/ready` (readiness), `/metrics` (Prometheus, owner-authed).
 
 ## Semantic layer
 
@@ -206,11 +211,27 @@ Deployment: the index runs as a separate optional service the engine talks to, s
 - **Keyed deduplication.** Content-defined chunking can leak whether a chunk already exists, which lets one tenant probe for another's data. Dedup is scoped per tenant with a keyed hash, so chunks only dedup within a tenant.
 - **Scoped search.** The semantic index carries the tenant and filters on it before nearest-neighbor, so search never crosses tenant boundaries.
 
+## Distribution (v2)
+
+barme 1.x is **single node**: one engine, one data directory, one volume.
+Durability comes from fsync-durable writes plus backups and the underlying
+volume, not from replication — there is no erasure coding, multi-node quorum, or
+automatic failover, and the deployment is pinned to a single replica on purpose.
+This is deliberate; a trustworthy single node is what v1 set out to be.
+
+Distribution is the **v2 headline**, deferred on purpose because content
+addressing makes it cheap to add *later*: chunks are immutable and hash-named, so
+replication is "copy the chunks the peer doesn't have" — already the sync
+protocol (`/sync/plan`, `/chunk`, `/sync/import`, `/proof`, `/delta`). No mutation
+conflicts, no rebalancing. The staged path and rationale live in
+[V1.md](V1.md#explicitly-v2-not-v1-distribution); the design is intentionally not
+worked out here yet.
+
 ## Open questions
 
-- S3 surface: how much of the long tail (ACLs, lifecycle rules, bucket policies) to implement, and when.
-- Storage backend for chunks: local disk layout, and whether to support pluggable backends.
-- Grace window length and GC scheduling under heavy write load.
-- Embedding models per content type, and where inference runs.
-- Erasure coding / replication for durability across nodes.
-- License.
+Resolved since v1.0: the on-disk layout (sharded content-addressed directories under the data dir, versioned by `format.json`), GC scheduling (a configurable grace window and sweep interval), and the license (MIT). Still open:
+
+- S3 surface: the long tail (ACLs, lifecycle rules, bucket policies), plus `ListObjects` and presigned query-string auth (tracked for 1.1).
+- Pluggable storage backends for chunks (today: local disk only).
+- Embedding models per content type, and where inference runs (the semantic layer is experimental).
+- Cross-node durability — erasure coding vs. replication — folded into the [Distribution (v2)](#distribution-v2) work.

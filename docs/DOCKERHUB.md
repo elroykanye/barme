@@ -48,12 +48,13 @@ Set with environment variables or a mounted `barme.toml`:
 
 ## Status
 
-Alpha. Works end to end, but it's early: uploads and downloads stream (memory
-stays flat regardless of object size), an acknowledged write survives a hard kill
-(writes are fsync-durable, the daemon recovers on restart), there's no default
-login (a random owner is minted on first boot), and access-key secrets are
-encrypted at rest. Formats and on-disk layout may still change before v1, and
-object contents aren't encrypted. Don't put anything you can't lose in it yet.
+Stable (v1.0). The on-disk format and API are frozen, an acknowledged write
+survives a hard kill (fsync-durable, recovers on restart), concurrent writes and
+GC are safe under load, there's no default login (a random owner is minted on
+first boot), and access-key secrets are encrypted at rest. Uploads and downloads
+stream, so memory stays flat regardless of object size. Scope: single node
+(durability is the volume plus backups, not replication), and object contents
+aren't encrypted (secrets at rest are).
 
 ## Links
 
