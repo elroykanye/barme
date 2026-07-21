@@ -21,9 +21,11 @@ around it.
   fields and new endpoints may be added; existing ones aren't removed or
   repurposed.
 
-Until 1.0 this is the intended contract and is largely in force, but the alpha
-caveat still holds: formats *may* still shift before 1.0, and nothing here is a
-promise to keep data you can't afford to lose.
+As of **v1.0** this is a binding contract, not an aspiration: 1.0 is the
+compatibility baseline, and later 1.x releases won't break 1.0 data or the stable
+API. Scope limits still apply — barme is a single node (durability is the volume
+plus your backups, not replication) and object contents aren't encrypted (secrets
+at rest are) — but the format-and-API promise itself now holds.
 
 ## Stable surface
 
