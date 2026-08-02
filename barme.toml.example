@@ -10,6 +10,23 @@ console_addr = "0.0.0.0:7374"
 
 cors_origins = ["*"]
 
+# Where the BROWSER should reach the API and the CDN, if that is not
+# http://<console host>:7373 and :7375.
+#
+# The console works out its own API base from the address bar, which is right
+# when it is reached directly and wrong the moment anything is put in front of
+# it: served from https://store.example.com it would call
+# http://store.example.com:7373 — a port the proxy does not publish, over plain
+# HTTP from an HTTPS page, which browsers block as mixed content.
+#
+# Set these when the console is published behind a reverse proxy, and route the
+# paths to the native and CDN listeners. Leaving them unset keeps the derive-
+# from-the-address-bar behaviour, which is what you want on localhost.
+#
+# Also settable as BARME_CONSOLE_API_URL / BARME_CONSOLE_CDN_URL.
+# console_api_url = "https://store.example.com/api"
+# console_cdn_url = "https://store.example.com/cdn"
+
 # Garbage collection: how long a chunk stays condemned before erase, and how
 # often the sweep runs.
 gc_grace_secs = 86400

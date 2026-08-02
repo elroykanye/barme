@@ -29,6 +29,19 @@ pub struct Config {
     pub credentials: Option<Credential>,
     pub embed_url: Option<String>,
     pub embed_model: String,
+    /// Where the browser should reach the native API and the CDN, when that is
+    /// not `http://<console host>:7373`.
+    ///
+    /// The console works out its own API base from the address bar, which is
+    /// right when it is reached directly and wrong the moment anything is put
+    /// in front of it: served from `https://store.example.com`, it calls
+    /// `http://store.example.com:7373`, a port the proxy does not publish, over
+    /// plain HTTP from an HTTPS page — blocked as mixed content even if it did.
+    ///
+    /// Setting these makes the console ask where it is told to. Leaving them
+    /// unset keeps today's behaviour exactly.
+    pub console_api_url: Option<String>,
+    pub console_cdn_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +82,10 @@ impl Default for Config {
             credentials: None,
             embed_url: None,
             embed_model: String::new(),
+            // Unset: derive from the address bar, which is correct for the
+            // common case of reaching the console directly.
+            console_api_url: None,
+            console_cdn_url: None,
         }
     }
 }
@@ -115,6 +132,16 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BARME_EMBED_MODEL") {
             self.embed_model = v;
+        }
+        if let Ok(v) = std::env::var("BARME_CONSOLE_API_URL") {
+            if !v.is_empty() {
+                self.console_api_url = Some(v);
+            }
+        }
+        if let Ok(v) = std::env::var("BARME_CONSOLE_CDN_URL") {
+            if !v.is_empty() {
+                self.console_cdn_url = Some(v);
+            }
         }
         if let Ok(v) = std::env::var("BARME_MAX_UPLOAD_BYTES") {
             if let Ok(n) = v.parse() {
