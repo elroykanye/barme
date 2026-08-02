@@ -92,6 +92,7 @@ fn http_base(addr: &str) -> String {
 #[cfg(feature = "ui")]
 mod ui {
     use axum::{
+        extract::State,
         http::{header, Uri},
         response::{IntoResponse, Response},
         Router,
@@ -102,38 +103,158 @@ mod ui {
     #[folder = "../../web/dist"]
     struct Assets;
 
-    pub fn router() -> Router {
-        Router::new().fallback(serve)
+    /// Where the browser should reach the API and the CDN, when the defaults
+    /// the console derives from the address bar are wrong (see
+    /// `Config::console_api_url`).
+    #[derive(Clone, Default)]
+    pub struct PublicUrls {
+        pub api: Option<String>,
+        pub cdn: Option<String>,
     }
 
-    async fn serve(uri: Uri) -> Response {
-        let path = uri.path().trim_start_matches('/');
-        let path = if path.is_empty() { "index.html" } else { path };
-
-        if let Some(file) = Assets::get(path) {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            return (
-                [(header::CONTENT_TYPE, mime.as_ref())],
-                file.data.into_owned(),
-            )
-                .into_response();
+    impl PublicUrls {
+        fn is_empty(&self) -> bool {
+            self.api.is_none() && self.cdn.is_none()
         }
 
-        // Unknown path: hand back index.html so client-side routing works.
-        match Assets::get("index.html") {
-            Some(index) => (
+        /// A script tag the console reads before its own bundle runs.
+        ///
+        /// Injected at SERVE time rather than baked in at build time, because
+        /// the console is compiled into the binary: a build-time constant would
+        /// mean rebuilding the image to change a deployment's public URL.
+        fn script(&self) -> String {
+            let mut fields = Vec::new();
+            if let Some(api) = &self.api {
+                fields.push(format!("api:{}", json_string(api)));
+            }
+            if let Some(cdn) = &self.cdn {
+                fields.push(format!("cdn:{}", json_string(cdn)));
+            }
+            format!("<script>window.__BARME__={{{}}}</script>", fields.join(","))
+        }
+    }
+
+    /// Minimal JSON string escaping. These values come from configuration, not
+    /// from a request, but they land inside a <script> tag — so `</script>` and
+    /// quotes are escaped rather than trusted.
+    fn json_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                // Escaped so a value can never close the surrounding tag.
+                '<' => out.push_str("\\u003c"),
+                '>' => out.push_str("\\u003e"),
+                '&' => out.push_str("\\u0026"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn no_script_when_nothing_is_configured() {
+            // The default path must be byte-identical to before this existed.
+            assert!(PublicUrls::default().is_empty());
+        }
+
+        #[test]
+        fn script_carries_only_what_is_set() {
+            let only_api = PublicUrls {
+                api: Some("https://store.example.com/api".into()),
+                cdn: None,
+            };
+            let s = only_api.script();
+            assert!(s.contains("api:\"https://store.example.com/api\""), "{s}");
+            assert!(!s.contains("cdn:"), "{s}");
+        }
+
+        #[test]
+        fn a_value_cannot_close_the_script_tag() {
+            let hostile = PublicUrls {
+                api: Some("https://x/</script><script>alert(1)</script>".into()),
+                cdn: None,
+            };
+            let s = hostile.script();
+            // Exactly two '<' in the whole thing: the opening tag and the
+            // closing one. Any third would be a value breaking out of the tag.
+            assert_eq!(s.matches('<').count(), 2, "{s}");
+            assert_eq!(s.matches("</script>").count(), 1, "{s}");
+        }
+
+        #[test]
+        fn injected_before_head_closes() {
+            let public = PublicUrls {
+                api: Some("https://store.example.com/api".into()),
+                cdn: None,
+            };
+            let html = "<html><head><title>x</title></head><body></body></html>";
+            let i = html.find("</head>").unwrap();
+            let out = format!("{}{}{}", &html[..i], public.script(), &html[i..]);
+            assert!(out.find("window.__BARME__").unwrap() < out.find("</head>").unwrap());
+        }
+    }
+
+    pub fn router(public: PublicUrls) -> Router {
+        Router::new().fallback(serve).with_state(public)
+    }
+
+    /// Serve index.html, with the public URLs injected when any are configured.
+    fn index(public: &PublicUrls) -> Response {
+        let Some(index) = Assets::get("index.html") else {
+            return (axum::http::StatusCode::NOT_FOUND, "ui not built").into_response();
+        };
+        if public.is_empty() {
+            return (
                 [(header::CONTENT_TYPE, "text/html")],
                 index.data.into_owned(),
             )
-                .into_response(),
-            None => (axum::http::StatusCode::NOT_FOUND, "ui not built").into_response(),
+                .into_response();
         }
+        let html = String::from_utf8_lossy(&index.data);
+        // Before </head> so it runs ahead of the module bundle.
+        let injected = match html.find("</head>") {
+            Some(i) => format!("{}{}{}", &html[..i], public.script(), &html[i..]),
+            None => format!("{}{}", public.script(), html),
+        };
+        ([(header::CONTENT_TYPE, "text/html")], injected).into_response()
+    }
+
+    async fn serve(State(public): State<PublicUrls>, uri: Uri) -> Response {
+        let path = uri.path().trim_start_matches('/');
+        let path = if path.is_empty() { "index.html" } else { path };
+
+        if path != "index.html" {
+            if let Some(file) = Assets::get(path) {
+                let mime = mime_guess::from_path(path).first_or_octet_stream();
+                return (
+                    [(header::CONTENT_TYPE, mime.as_ref())],
+                    file.data.into_owned(),
+                )
+                    .into_response();
+            }
+        }
+
+        // index.html, or an unknown path handed back to client-side routing.
+        index(&public)
     }
 }
 
 /// Barme object store server.
 #[derive(clap::Parser)]
-#[command(name = "barmed", version, about = "Barme — a content-addressed object store")]
+#[command(
+    name = "barmed",
+    version,
+    about = "Barme — a content-addressed object store"
+)]
 struct Cli {
     /// Config file to load (default: barme.toml, or $BARME_CONFIG)
     #[arg(long, value_name = "FILE")]
@@ -297,7 +418,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let mut config = barme_config::Config::load()?;
@@ -484,7 +607,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(feature = "ui")]
     {
-        let console = async move { axum::serve(console_listener, ui::router()).await };
+        let console = {
+            let public = ui::PublicUrls {
+                api: config.console_api_url.clone(),
+                cdn: config.console_cdn_url.clone(),
+            };
+            async move { axum::serve(console_listener, ui::router(public)).await }
+        };
         tokio::try_join!(s3, native, cdn, console)?;
     }
     #[cfg(not(feature = "ui"))]

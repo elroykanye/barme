@@ -1,12 +1,25 @@
 // Thin client for the barme native API. Auth is Basic (owner access/secret),
 // held in localStorage since this console runs on the owner's own machine.
 
-// Default to the host the console was loaded from, so opening it over a LAN/WSL
-// IP still reaches the API and CDN on the same host (not the browser's own
-// localhost). Override with VITE_BARME_API / VITE_BARME_CDN at build time.
+// Where the API and CDN live, most specific source first:
+//
+//   1. window.__BARME__ — injected into index.html by barmed when
+//      console_api_url / console_cdn_url are configured. This is the only one a
+//      DEPLOYMENT can set: the console is compiled into the binary, so anything
+//      resolved at build time would mean rebuilding the image to change a URL.
+//   2. VITE_BARME_API / VITE_BARME_CDN — build-time, for custom builds.
+//   3. The host the console was loaded from, so opening it over a LAN or WSL
+//      address still reaches the API on that host rather than the browser's own
+//      localhost.
+//
+// (3) is right when the console is reached directly and wrong the moment
+// anything is put in front of it: served from https://store.example.com it
+// would call http://store.example.com:7373, a port a proxy does not publish,
+// over plain HTTP from an HTTPS page. Hence (1).
 const HOST = typeof window !== "undefined" ? window.location.hostname || "localhost" : "localhost";
-const BASE = import.meta.env.VITE_BARME_API ?? `http://${HOST}:7373`;
-const CDN = import.meta.env.VITE_BARME_CDN ?? `http://${HOST}:7375`;
+const INJECTED = typeof window !== "undefined" ? window.__BARME__ : undefined;
+const BASE = INJECTED?.api ?? import.meta.env.VITE_BARME_API ?? `http://${HOST}:7373`;
+const CDN = INJECTED?.cdn ?? import.meta.env.VITE_BARME_CDN ?? `http://${HOST}:7375`;
 
 export type Creds = { access: string; secret: string };
 
