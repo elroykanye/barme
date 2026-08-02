@@ -30,7 +30,7 @@ Store and read an object:
 ## Tags
 
 - `latest` — most recent release
-- `1.0.0`, `1.0.x` — pinned versions
+- `1.1.0`, `1.x.y` — pinned versions
 
 ## Image
 
@@ -45,6 +45,9 @@ Set with environment variables or a mounted `barme.toml`:
 - `BARME_DATA_DIR` — data location (default `/data`)
 - `BARME_EMBED_URL`, `BARME_EMBED_MODEL` — optional semantic search, proxied to
   your own embedder
+- `BARME_CONSOLE_API_URL`, `BARME_CONSOLE_CDN_URL` — where the browser should
+  reach the API and the CDN, when the console is published behind a reverse
+  proxy rather than reached on its own port
 
 ## Status
 

@@ -16,7 +16,7 @@ Storing things this way gives you a few properties without extra machinery:
 ## Quickstart
 
     docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-      -v barme:/data elroykanye/barme:1.0.0
+      -v barme:/data elroykanye/barme:1.1.0
 
 Console on http://localhost:7374. On first start barme prints a generated owner
 login (access key `barme`, a random secret) — copy it from the logs, or set your

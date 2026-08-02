@@ -1,33 +1,54 @@
-# barme 1.0.0
+# barme 1.1.0
 
-barme is 1.0. It makes three promises and keeps them:
-
-1. **The on-disk format and API are frozen.** Anything written to a 1.x server
-   reads on every later 1.x. Format changes ride a version stamp and a migration,
-   never a silent break.
-2. **You can trust it with data.** An acknowledged write survives a hard kill
-   (fsync-durable, recovers on restart); concurrent writes and GC are safe under
-   load; secrets are encrypted at rest; there's no standing default credential.
-3. **It's operable.** Liveness + readiness probes, Prometheus `/metrics`, a
-   documented and tested backup/restore story, and a Helm chart.
-
-Everything is proven by harnesses that run in CI territory, not just asserted:
-crash/kill durability, GC-under-load, security posture, multipart abuse, and a
-copied-data-dir restore.
+A deployment can now tell the console where the API and the CDN really are.
+Additive over 1.0: new optional settings, no change to the on-disk format and no
+change to any existing behaviour.
 
 ## In this release
 
-Two delivery-correctness fixes closed before cutting 1.0:
+- **`console_api_url` / `console_cdn_url` (#11).** The console worked out its API
+  base from the address bar plus a fixed port. That's right when it's reached
+  directly and wrong the moment anything is put in front of it: served from
+  `https://store.example.com` it called `http://store.example.com:7373` — a port
+  a reverse proxy doesn't publish, over plain HTTP from an HTTPS page, which
+  browsers block as mixed content even when the port is open. Sign-in then never
+  completed, and because the blocked request breaks the padlock it read as a TLS
+  fault, sending you to inspect a certificate that was perfectly fine.
 
-- **`/cdn/{hash}` erasure caveat, documented (#6).** The immutable, cache-forever
-  hash URL can't be revoked once bytes are in a cache, so deleting at the origin
-  can't pull them back. This is now written down clearly — `/cdn` is for public,
-  non-erasable content; serve erasable or personal data over the short-lived
-  `/s/{pot}/{key}` share instead. Documented in USAGE, STABILITY, and the code.
-- **Object hash surfaced on every write path (#7).** A new `X-Barme-Object-Id`
-  response header carries the object's content id on single PUT, multipart
-  complete, and HEAD — the reliable handle for a `/cdn` link, since an S3
-  multipart ETag is a digest of part digests, not the object hash.
+  Nothing outside the server could fix it: `VITE_BARME_API` is a Vite
+  compile-time constant and the console is baked into the binary, so changing it
+  meant rebuilding the image; `cors_origins` covers only the CORS half; and
+  barmed knew its bind addresses but had no notion of a public URL. Now it does.
+  Set `console_api_url` and `console_cdn_url` in `barme.toml` (or
+  `BARME_CONSOLE_API_URL` / `BARME_CONSOLE_CDN_URL`) and they're injected into
+  `index.html` as it is served — at serve time, not build time, which is the
+  whole point: a deployment sets them without rebuilding an image. The console
+  prefers them over what it would otherwise derive.
+
+  The values land inside a script tag, so they're escaped rather than trusted,
+  with a test that a value can't close the tag it sits in.
+
+## Compatibility
+
+Drop-in over 1.0.0. Leave the new settings unset and not a byte of the served
+page changes — the console behaves exactly as before, which is what you want on
+localhost. Same on-disk format, same stable API (see `docs/STABILITY.md`).
+
+## Upgrading behind a proxy
+
+If you publish the console through a reverse proxy, set the two URLs and route
+those paths to the native (7373) and CDN (7375) listeners:
+
+    console_api_url = "https://store.example.com/api"
+    console_cdn_url = "https://store.example.com/cdn"
+
+## Docker
+
+```
+docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
+  -e BARME_MASTER_KEY=$(openssl rand -hex 32) \
+  -v barme:/data elroykanye/barme:1.1.0
+```
 
 ## The road here
 
@@ -37,24 +58,5 @@ Two delivery-correctness fixes closed before cutting 1.0:
 - 0.7.0 — on-disk format version + API freeze
 - 0.8.0 — S3 bucket operations, Helm chart
 - 0.9.0 — operability (backup/restore, readiness, metrics, name fuzzing)
-- 1.0.0 — the delivery caveats above, and meaning the three promises
-
-## Compatibility
-
-Drop-in over 0.9.0. This is the compatibility baseline: 1.x won't break 1.0 data
-or the stable API (see `docs/STABILITY.md`).
-
-## Docker
-
-```
-docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 \
-  -e BARME_MASTER_KEY=$(openssl rand -hex 32) \
-  -v barme:/data elroykanye/barme:1.0.0
-```
-
-## Scope and what's next
-
-1.0 is a single node you'd trust. Not in 1.0, by design: horizontal
-distribution (the v2 headline — content-addressing makes replication cheap to add
-later), encryption of object contents, and the experimental surfaces (semantic
-search, sync, webhooks, image-codec transcoding) that stay marked as such.
+- 1.0.0 — frozen format and API, trustworthy with data, operable
+- 1.1.0 — the console reachable from behind a reverse proxy

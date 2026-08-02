@@ -4,7 +4,7 @@
 
 Docker:
 
-    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:1.0.0
+    docker run -p 7373:7373 -p 7374:7374 -p 7375:7375 -p 9000:9000 -v barme:/data elroykanye/barme:1.1.0
 
 Or download a `barmed` binary from the [releases](https://github.com/elroykanye/barme/releases) and run `./barmed`. From source: `cargo run -p barmed --features ui`.
 
@@ -92,6 +92,11 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     # any (convenient locally). In production list your console/app origins so
     # other sites can't script the API from a victim's browser.
     cors_origins = ["https://console.example.com"]
+    # Where the browser should reach the API and the CDN, if that isn't
+    # http://<console host>:7373 and :7375. Set these when the console is
+    # published behind a reverse proxy; see "Console behind a proxy" below.
+    # console_api_url = "https://store.example.com/api"
+    # console_cdn_url = "https://store.example.com/cdn"
 
     [credentials]
     access_key = "barme"
@@ -105,7 +110,38 @@ barme runs on defaults with no config. To change them, put a `barme.toml` next t
     # embed_url   = "http://localhost:11434/api/embeddings"
     # embed_model = "nomic-embed-text"
 
-Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_MASTER_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`, `BARME_MAX_UPLOAD_BYTES`. If a port is already taken, barme rolls forward to the next free one.
+Environment variables override the file: `BARME_DATA_DIR`, `BARME_ACCESS_KEY`, `BARME_SECRET_KEY`, `BARME_MASTER_KEY`, `BARME_EMBED_URL`, `BARME_EMBED_MODEL`, `BARME_MAX_UPLOAD_BYTES`, `BARME_CONSOLE_API_URL`, `BARME_CONSOLE_CDN_URL`. If a port is already taken, barme rolls forward to the next free one.
+
+## Console behind a proxy
+
+Reached directly, the console derives its API base from the address bar plus the
+native port, and that's right. Put anything in front of it and it stops being
+right: served from `https://store.example.com`, the console would call
+`http://store.example.com:7373` — a port the proxy doesn't publish, over plain
+HTTP from an HTTPS page, which browsers block as mixed content. Sign-in never
+completes, and the blocked request breaks the padlock, so it looks like a
+certificate problem when the certificate is fine.
+
+Tell the server what the browser should use, and route those paths to the native
+and CDN listeners:
+
+    console_api_url = "https://store.example.com/api"    # -> native, :7373
+    console_cdn_url = "https://store.example.com/cdn"    # -> CDN, :7375
+
+The console uses each as a prefix, so the proxy should strip the prefix and pass
+the rest through: `/api/objects/photos/cat.jpg` reaches the native listener as
+`/objects/photos/cat.jpg`. A URL on a separate host (`https://api.example.com`)
+works the same way, with no prefix to strip.
+
+Also settable as `BARME_CONSOLE_API_URL` / `BARME_CONSOLE_CDN_URL`. They're
+injected into the console's `index.html` as it's served, so a deployment can
+change them without rebuilding the image. Leave them unset — the right thing
+locally — and the served page is byte-for-byte what it was before.
+
+These URLs say where the browser sends requests; `cors_origins` says which
+origins the API answers. Publishing everything under one host makes the calls
+same-origin and CORS moot, but if the API lands on a different host than the
+console, list the console's public origin in `cors_origins`.
 
 ## Credentials and the master key
 
