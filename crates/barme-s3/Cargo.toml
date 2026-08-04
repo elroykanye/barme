@@ -11,6 +11,11 @@ axum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures-util.workspace = true
+hex.workspace = true
+# `parsing` on top of the workspace `formatting`: manifests record RFC3339 and
+# ListObjectsV2's LastModified is UTC-with-milliseconds, so timestamps are read
+# back in and reformatted.
+time = { workspace = true, features = ["parsing"] }
 tower-http = { version = "0.6", features = ["trace"] }
 
 [dev-dependencies]

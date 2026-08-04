@@ -25,7 +25,7 @@ use axum::{
     Router,
 };
 use barme_auth::{authorize, verify_sigv4, Action, Credentials, Principal, SignedRequest};
-use barme_engine::{Engine, EngineError, PartMeta};
+use barme_engine::{Engine, EngineError, ObjectPage, PartMeta};
 use futures_util::{StreamExt, TryStreamExt};
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
@@ -35,6 +35,11 @@ const DEFAULT_CONTENT_TYPE: &str = "application/octet-stream";
 /// Cap on the CompleteMultipartUpload request body. It only carries a part list;
 /// 10k parts at ~120 bytes each is ~1.2 MiB, so 16 MiB is comfortable headroom.
 const MAX_COMPLETE_BODY: usize = 16 * 1024 * 1024;
+
+/// Most keys one ListObjectsV2 page may return. S3's own ceiling, and what
+/// clients assume when they page; a larger `max-keys` is silently clamped to it
+/// rather than refused, which is also what S3 does.
+const MAX_KEYS_LIMIT: usize = 1000;
 
 /// Anything the engine hands back becomes a status + message. Not-found is
 /// modelled as an `Option` on the read paths, so it never reaches here.
@@ -94,6 +99,10 @@ pub fn app(state: S3State) -> Router {
         .route("/{bucket}", put(create_bucket))
         .route("/{bucket}", axum::routing::head(head_bucket))
         .route("/{bucket}", delete(delete_bucket))
+        .route("/{bucket}", get(list_objects_v2))
+        // Clients differ on whether the pot path carries a trailing slash, and
+        // axum doesn't fold one into the other, so listing answers on both.
+        .route("/{bucket}/", get(list_objects_v2))
         // Object-level operations (and the multipart sequence by query param).
         .route("/{bucket}/{*key}", put(put_object))
         .route("/{bucket}/{*key}", get(get_object))
@@ -430,6 +439,120 @@ async fn list_buckets(State(st): State<S3State>) -> Result<Response, S3Error> {
     Ok(xml_response(list_buckets_xml(&buckets)))
 }
 
+/// The ListObjectsV2 request, decoded: what to list, and what the response has
+/// to echo back to the client.
+struct ListQuery {
+    prefix: String,
+    delimiter: String,
+    max_keys: usize,
+    /// The token the client sent, echoed back verbatim. `None` on a first page.
+    continuation_token: Option<String>,
+    /// `start-after`, echoed back verbatim.
+    start_after: Option<String>,
+    /// The key to resume strictly after, from the token or from `start-after`.
+    after: Option<String>,
+    /// `encoding-type=url`: URL-encode keys and prefixes in the response, so a
+    /// key holding a character XML can't carry still round-trips.
+    url_encode: bool,
+}
+
+impl ListQuery {
+    fn parse(params: &HashMap<String, String>) -> Result<Self, S3Error> {
+        let value = |k: &str| params.get(k).map(|v| percent_decode(v));
+
+        let max_keys = match params.get("max-keys") {
+            None => MAX_KEYS_LIMIT,
+            Some(raw) => raw
+                .parse::<usize>()
+                .map_err(|_| S3Error::BadRequest("max-keys must be a non-negative integer".into()))?
+                .min(MAX_KEYS_LIMIT),
+        };
+
+        let continuation_token = value("continuation-token").filter(|t| !t.is_empty());
+        let start_after = value("start-after").filter(|k| !k.is_empty());
+
+        // A token is our own opaque handle: the last key of the previous page,
+        // hex-encoded so an arbitrary key survives a round trip through a query
+        // string. When both are present the token wins, as it does in S3 — the
+        // client is mid-pagination and `start-after` is a stale first-page hint.
+        let after = match &continuation_token {
+            Some(t) => Some(decode_continuation_token(t)?),
+            None => start_after.clone(),
+        };
+
+        let encoding_type = value("encoding-type").unwrap_or_default();
+        if !encoding_type.is_empty() && encoding_type != "url" {
+            return Err(S3Error::BadRequest(
+                "encoding-type must be url if given".into(),
+            ));
+        }
+
+        Ok(ListQuery {
+            prefix: value("prefix").unwrap_or_default(),
+            delimiter: value("delimiter").unwrap_or_default(),
+            max_keys,
+            continuation_token,
+            start_after,
+            after,
+            url_encode: encoding_type == "url",
+        })
+    }
+
+    /// Apply `encoding-type` to one key or prefix on the way out.
+    fn encode(&self, s: &str) -> String {
+        if self.url_encode {
+            uri_encode(s)
+        } else {
+            s.to_string()
+        }
+    }
+}
+
+/// ListObjectsV2 (`GET /{pot}?list-type=2`): one page of a pot's keys, with the
+/// prefix, delimiter and continuation token S3 tooling pages by.
+///
+/// Only v2 is served. The v1 form (`GET /{pot}` with `marker`) answers 501
+/// rather than pretending: a client that got an empty v2-shaped body back would
+/// read it as "the pot is empty" and a mirror would happily copy nothing.
+async fn list_objects_v2(
+    State(st): State<S3State>,
+    Path(bucket): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, S3Error> {
+    let params = parse_query(query.as_deref());
+    if params.get("list-type").map(String::as_str) != Some("2") {
+        return Ok((
+            StatusCode::NOT_IMPLEMENTED,
+            "only ListObjectsV2 is supported; send list-type=2",
+        )
+            .into_response());
+    }
+
+    if !st.engine.bucket_exists(&bucket)? {
+        return Ok((StatusCode::NOT_FOUND, "no such pot").into_response());
+    }
+
+    let q = ListQuery::parse(&params)?;
+
+    // A page reads a directory and up to `max_keys` manifests, so it goes on a
+    // blocking task like the other filesystem-heavy handlers.
+    let engine = st.engine.clone();
+    let (b, prefix, delimiter, after, max) = (
+        bucket.clone(),
+        q.prefix.clone(),
+        q.delimiter.clone(),
+        q.after.clone(),
+        q.max_keys,
+    );
+    let page = tokio::task::spawn_blocking(move || {
+        engine.list_objects(&b, &prefix, &delimiter, after.as_deref(), max)
+    })
+    .await
+    .map_err(|e| S3Error::Internal(e.to_string()))??;
+
+    Ok(xml_response(list_objects_xml(&bucket, &q, &page)))
+}
+
 /// Header carrying the object's own content id (its blake3) — the handle for a
 /// `/cdn/{hash}` link. Set on both write paths (single PUT and multipart
 /// complete) and on HEAD, so a client gets the same hash regardless of how the
@@ -468,6 +591,78 @@ fn parse_query(raw: Option<&str>) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Percent-decode a query-string value.
+///
+/// `+` is left as a literal plus, not turned into a space: SigV4 canonicalizes
+/// query strings with `%20`, so a `+` in a signed request is a real plus, and a
+/// prefix like `photos/holiday+2026/` would otherwise silently match nothing.
+/// A stray `%` that isn't followed by two hex digits is kept as written rather
+/// than swallowed.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(&hi), Some(&lo)) => match (hex_nibble(hi), hex_nibble(lo)) {
+                (Some(hi), Some(lo)) => {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                }
+                _ => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-encode for `encoding-type=url`, AWS's rules: only the unreserved set
+/// passes through, so `/` is encoded too. That's the point of the option — a key
+/// can legally hold bytes XML has no way to represent, and encoding is how the
+/// response stays parseable; the SDK decodes on the way back.
+fn uri_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Encode the cursor into an opaque continuation token. Keys can hold `&`, `=`
+/// and worse, so the token is hex: it survives any query string, and clients
+/// treat it as opaque anyway.
+fn encode_continuation_token(key: &str) -> String {
+    hex::encode(key.as_bytes())
+}
+
+fn decode_continuation_token(token: &str) -> Result<String, S3Error> {
+    let bytes = hex::decode(token)
+        .map_err(|_| S3Error::BadRequest("continuation-token is not a token we issued".into()))?;
+    String::from_utf8(bytes)
+        .map_err(|_| S3Error::BadRequest("continuation-token is not a token we issued".into()))
 }
 
 /// Pull the `<PartNumber>` values out of a CompleteMultipartUpload body, in the
@@ -551,6 +746,97 @@ fn list_buckets_xml(buckets: &[String]) -> String {
         ));
     }
     body.push_str("</Buckets></ListAllMyBucketsResult>");
+    body
+}
+
+/// S3's LastModified: UTC, milliseconds, `Z`. Manifests record RFC3339, which is
+/// close but allows a non-UTC offset and any number of sub-second digits, so it
+/// is read back and reformatted rather than passed through. A timestamp that
+/// won't parse falls back to the epoch: the field is required and must be
+/// well-formed for a client to parse the page at all, so one odd manifest must
+/// not take the whole listing down with it.
+fn s3_timestamp(rfc3339: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    let Ok(t) = time::OffsetDateTime::parse(rfc3339, &Rfc3339) else {
+        return "1970-01-01T00:00:00.000Z".to_string();
+    };
+    let t = t.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond(),
+    )
+}
+
+/// The ListObjectsV2 response body.
+///
+/// `KeyCount` counts entries *and* collapsed prefixes, the way S3 counts them,
+/// so it always matches what `MaxKeys` bounded. `NextContinuationToken` appears
+/// only when keys remain, and `IsTruncated` is exactly that condition — a client
+/// stops paging on `false`, so the two must never disagree.
+fn list_objects_xml(bucket: &str, q: &ListQuery, page: &ObjectPage) -> String {
+    let mut body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListBucketResult xmlns=\"{XMLNS}\">\
+         <Name>{}</Name><Prefix>{}</Prefix><KeyCount>{}</KeyCount>\
+         <MaxKeys>{}</MaxKeys><IsTruncated>{}</IsTruncated>",
+        xml_escape(bucket),
+        xml_escape(&q.encode(&q.prefix)),
+        page.entries.len() + page.common_prefixes.len(),
+        q.max_keys,
+        page.next_after.is_some(),
+    );
+    if !q.delimiter.is_empty() {
+        body.push_str(&format!(
+            "<Delimiter>{}</Delimiter>",
+            xml_escape(&q.encode(&q.delimiter)),
+        ));
+    }
+    if q.url_encode {
+        body.push_str("<EncodingType>url</EncodingType>");
+    }
+    // Echo the cursor the client sent, so it can match a response to a request.
+    if let Some(t) = &q.continuation_token {
+        body.push_str(&format!(
+            "<ContinuationToken>{}</ContinuationToken>",
+            xml_escape(t),
+        ));
+    }
+    if let Some(k) = &q.start_after {
+        body.push_str(&format!(
+            "<StartAfter>{}</StartAfter>",
+            xml_escape(&q.encode(k)),
+        ));
+    }
+    if let Some(next) = &page.next_after {
+        body.push_str(&format!(
+            "<NextContinuationToken>{}</NextContinuationToken>",
+            encode_continuation_token(next),
+        ));
+    }
+    for o in &page.entries {
+        body.push_str(&format!(
+            "<Contents><Key>{}</Key><LastModified>{}</LastModified>\
+             <ETag>\"{}\"</ETag><Size>{}</Size>\
+             <StorageClass>STANDARD</StorageClass></Contents>",
+            xml_escape(&q.encode(&o.key)),
+            s3_timestamp(&o.created_at),
+            xml_escape(&o.object_id.to_string()),
+            o.size,
+        ));
+    }
+    for p in &page.common_prefixes {
+        body.push_str(&format!(
+            "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+            xml_escape(&q.encode(p)),
+        ));
+    }
+    body.push_str("</ListBucketResult>");
     body
 }
 
