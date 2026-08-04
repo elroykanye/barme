@@ -819,6 +819,100 @@ impl Engine {
         Ok(self.store.pointers.list(bucket)?)
     }
 
+    /// One page of a pot's objects, in byte order, with the prefix/delimiter and
+    /// pagination that listing clients expect.
+    ///
+    /// `prefix` keeps only keys starting with it. A non-empty `delimiter`
+    /// collapses each run of keys sharing the same text between the prefix and
+    /// the next delimiter into a single common prefix — how folder-style
+    /// browsing is built. `start_after` resumes strictly after that key, so
+    /// paging with the previous page's `next_after` returns every key exactly
+    /// once. `max` bounds the page, counting an entry and a collapsed prefix
+    /// alike as one unit, the way S3 counts them against MaxKeys.
+    ///
+    /// Keys are paginated before any manifest is read, so a page costs one
+    /// directory read plus `max` manifest reads regardless of how large the pot
+    /// is. A key whose pointer vanishes mid-listing (a concurrent delete) is
+    /// dropped from the page rather than reported at size zero; a pointer whose
+    /// manifest is missing is real corruption and still errors, as it does on
+    /// every other read path.
+    pub fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        delimiter: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<ObjectPage> {
+        let mut keys: Vec<String> = self
+            .store
+            .pointers
+            .list(bucket)?
+            .into_iter()
+            .filter(|k| k.starts_with(prefix))
+            .filter(|k| start_after.is_none_or(|after| k.as_str() > after))
+            .collect();
+        keys.sort();
+
+        let mut page = ObjectPage::default();
+
+        // Walk in order, spending one unit of `max` per entry or per new common
+        // prefix. Sorting means a group's keys are contiguous, so the keys after
+        // the first in a group fold into the prefix already emitted and cost
+        // nothing — they only advance how far this page got.
+        let mut units = 0usize;
+        let mut selected: Vec<String> = Vec::new();
+        let mut last_group: Option<String> = None;
+        let mut consumed = 0usize;
+        for key in &keys {
+            let group = (!delimiter.is_empty())
+                .then(|| key[prefix.len()..].find(delimiter))
+                .flatten()
+                .map(|at| key[..prefix.len() + at + delimiter.len()].to_string());
+
+            match group {
+                Some(g) if last_group.as_deref() == Some(g.as_str()) => {}
+                Some(g) => {
+                    if units == max {
+                        break;
+                    }
+                    page.common_prefixes.push(g.clone());
+                    last_group = Some(g);
+                    units += 1;
+                }
+                None => {
+                    if units == max {
+                        break;
+                    }
+                    selected.push(key.clone());
+                    units += 1;
+                }
+            }
+            consumed += 1;
+        }
+
+        // A page that got nowhere (`max` of 0) has no key to resume after, so it
+        // reports no continuation rather than one the caller can't use.
+        if consumed < keys.len() && consumed > 0 {
+            page.next_after = Some(keys[consumed - 1].clone());
+        }
+
+        for key in selected {
+            // None means the key was deleted between the directory read and
+            // here; skip it rather than invent a zero-sized object.
+            let Some(m) = self.manifest(bucket, &key)? else {
+                continue;
+            };
+            page.entries.push(ObjectEntry {
+                key,
+                size: m.original.size_bytes,
+                object_id: m.object_id,
+                created_at: m.created_at,
+            });
+        }
+        Ok(page)
+    }
+
     pub fn bucket_config(&self, bucket: &str) -> Result<barme_core::BucketConfig> {
         Ok(self.store.meta.config(bucket)?)
     }
@@ -1326,6 +1420,33 @@ struct EffectivePolicy {
 pub struct PartMeta {
     pub etag: String,
     pub size: u64,
+}
+
+/// One object in a listing. Everything a mirroring tool needs to decide whether
+/// it already has this object, without reading a single chunk.
+#[derive(Debug, Clone)]
+pub struct ObjectEntry {
+    pub key: String,
+    pub size: u64,
+    /// The manifest's content address. Doubles as the object's ETag and as the
+    /// handle for a `/cdn/{hash}` link.
+    pub object_id: Hash,
+    /// When this version was written, RFC3339, as the manifest recorded it.
+    pub created_at: String,
+}
+
+/// One page of [`Engine::list_objects`].
+#[derive(Debug, Clone, Default)]
+pub struct ObjectPage {
+    /// Keys in this page, in byte order.
+    pub entries: Vec<ObjectEntry>,
+    /// Folder-style groupings collapsed by the delimiter, in byte order. Empty
+    /// when no delimiter was given.
+    pub common_prefixes: Vec<String>,
+    /// The last key this page accounted for, when more remain past it. Feed it
+    /// back as `start_after` to get the next page; `None` means this was the
+    /// last page.
+    pub next_after: Option<String>,
 }
 
 /// What [`Engine::list_parts`] returns: the target pot/key and the staged parts.
