@@ -1439,6 +1439,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_literal_percent_in_a_key_is_encoded_not_passed_through() {
+        let app = app(state());
+        // `%25` in the request URI, so the key that lands is `100%-done.txt`.
+        put(&app, "/pot/100%25-done.txt", b"x").await;
+
+        // This is why honouring encoding-type isn't cosmetic. botocore sets it on
+        // every list and percent-decodes the reply, so a raw `%` here would come
+        // back through the SDK mangled — or throw. Encoded, it round-trips.
+        let xml = list(&app, "/pot?list-type=2&encoding-type=url").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["100%25-done.txt"]);
+
+        // Without the parameter the key is reported as it is stored.
+        let xml = list(&app, "/pot?list-type=2").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["100%-done.txt"]);
+    }
+
+    #[tokio::test]
     async fn a_key_with_xml_punctuation_comes_back_escaped() {
         let app = app(state());
         // Escaped in the request URI because `<`/`>` aren't legal there either;
