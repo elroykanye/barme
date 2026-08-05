@@ -1194,6 +1194,260 @@ mod tests {
         assert_eq!(status(&app, "DELETE", "/full").await, StatusCode::CONFLICT);
     }
 
+    // ---- ListObjectsV2 ----
+
+    /// Read a body as text, for poking at XML.
+    async fn body_text(res: Response) -> String {
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Every occurrence of the text between two markers, in order.
+    fn all_between(haystack: &str, open: &str, close: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = haystack;
+        while let Some(start) = rest.find(open) {
+            rest = &rest[start + open.len()..];
+            let Some(end) = rest.find(close) else { break };
+            out.push(rest[..end].to_string());
+            rest = &rest[end + close.len()..];
+        }
+        out
+    }
+
+    async fn put(app: &axum::Router, uri: &str, body: &[u8]) {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    async fn list(app: &axum::Router, uri: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri}");
+        body_text(res).await
+    }
+
+    #[tokio::test]
+    async fn list_v2_returns_keys_with_size_and_etag() {
+        let app = app(state());
+        put(&app, "/photos/a.txt", b"aa").await;
+        put(&app, "/photos/b.txt", b"bbbb").await;
+
+        let xml = list(&app, "/photos?list-type=2").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["a.txt", "b.txt"]);
+        assert_eq!(all_between(&xml, "<Size>", "</Size>"), ["2", "4"]);
+        assert!(xml.contains("<Name>photos</Name>"));
+        assert!(xml.contains("<KeyCount>2</KeyCount>"));
+        assert!(xml.contains("<IsTruncated>false</IsTruncated>"));
+        // A well-formed LastModified is what an SDK's strict parser needs.
+        for ts in all_between(&xml, "<LastModified>", "</LastModified>") {
+            assert!(ts.ends_with('Z'), "not UTC-with-Z: {ts}");
+            assert_eq!(ts.len(), "1970-01-01T00:00:00.000Z".len(), "{ts}");
+        }
+        // The ETag is the object id, the same handle HEAD reports.
+        for etag in all_between(&xml, "<ETag>", "</ETag>") {
+            assert!(etag.starts_with("\"blake3:"), "{etag}");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_v2_answers_on_the_trailing_slash_form_too() {
+        let app = app(state());
+        put(&app, "/photos/a.txt", b"aa").await;
+        let xml = list(&app, "/photos/?list-type=2").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["a.txt"]);
+    }
+
+    #[tokio::test]
+    async fn list_v2_of_an_empty_pot_is_an_empty_page_not_a_404() {
+        let app = app(state());
+        assert_eq!(status(&app, "PUT", "/fresh").await, StatusCode::OK);
+        let xml = list(&app, "/fresh?list-type=2").await;
+        assert!(xml.contains("<KeyCount>0</KeyCount>"));
+        assert!(!xml.contains("<Contents>"));
+    }
+
+    #[tokio::test]
+    async fn list_v2_of_an_unknown_pot_is_404() {
+        let app = app(state());
+        assert_eq!(
+            status(&app, "GET", "/ghost?list-type=2").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_get_on_the_pot_path_is_not_implemented() {
+        let app = app(state());
+        put(&app, "/photos/a.txt", b"aa").await;
+        // v1 ListObjects. Answering 501 beats handing back a v2 body that a v1
+        // client would read as an empty pot.
+        assert_eq!(
+            status(&app, "GET", "/photos").await,
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    #[tokio::test]
+    async fn list_v2_filters_by_prefix_and_groups_by_delimiter() {
+        let app = app(state());
+        for key in ["logs/2026/a", "logs/2026/b", "photos/c", "readme"] {
+            put(&app, &format!("/pot/{key}"), b"x").await;
+        }
+
+        let xml = list(&app, "/pot?list-type=2&delimiter=%2F").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["readme"]);
+        assert_eq!(
+            all_between(&xml, "<CommonPrefixes><Prefix>", "</Prefix>"),
+            ["logs/", "photos/"]
+        );
+
+        // A prefix that itself needs decoding, and grouping under it.
+        let xml = list(&app, "/pot?list-type=2&prefix=logs%2F&delimiter=%2F").await;
+        assert!(all_between(&xml, "<Key>", "</Key>").is_empty());
+        assert_eq!(
+            all_between(&xml, "<CommonPrefixes><Prefix>", "</Prefix>"),
+            ["logs/2026/"]
+        );
+    }
+
+    #[tokio::test]
+    async fn paging_by_continuation_token_returns_every_key_exactly_once() {
+        let app = app(state());
+        let expected: Vec<String> = (0..12).map(|i| format!("k{i:02}")).collect();
+        for key in &expected {
+            put(&app, &format!("/pot/{key}"), b"x").await;
+        }
+
+        // Page at 5, the way a mirroring tool would: follow the token until the
+        // server stops issuing one.
+        let mut seen: Vec<String> = Vec::new();
+        let mut uri = "/pot?list-type=2&max-keys=5".to_string();
+        let mut pages = 0;
+        loop {
+            let xml = list(&app, &uri).await;
+            seen.extend(all_between(&xml, "<Key>", "</Key>"));
+            pages += 1;
+            assert!(pages <= 5, "paging did not terminate");
+            let next = all_between(&xml, "<NextContinuationToken>", "</NextContinuationToken>");
+            match next.first() {
+                Some(token) => {
+                    assert!(xml.contains("<IsTruncated>true</IsTruncated>"));
+                    uri = format!("/pot?list-type=2&max-keys=5&continuation-token={token}");
+                }
+                None => {
+                    assert!(xml.contains("<IsTruncated>false</IsTruncated>"));
+                    break;
+                }
+            }
+        }
+        assert_eq!(pages, 3); // 5 + 5 + 2
+        assert_eq!(seen, expected);
+    }
+
+    #[tokio::test]
+    async fn a_token_survives_a_key_holding_query_string_punctuation() {
+        let app = app(state());
+        // `&` and `=` in a key would tear a raw cursor in half on the way back.
+        for key in ["a&b=c", "z"] {
+            put(&app, &format!("/pot/{key}"), b"x").await;
+        }
+        let xml = list(&app, "/pot?list-type=2&max-keys=1").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["a&amp;b=c"]);
+        let token = all_between(&xml, "<NextContinuationToken>", "</NextContinuationToken>")
+            .pop()
+            .expect("a truncated page must issue a token");
+
+        let xml = list(
+            &app,
+            &format!("/pot?list-type=2&max-keys=1&continuation-token={token}"),
+        )
+        .await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["z"]);
+    }
+
+    #[tokio::test]
+    async fn start_after_resumes_past_a_key() {
+        let app = app(state());
+        for key in ["a", "b", "c"] {
+            put(&app, &format!("/pot/{key}"), b"x").await;
+        }
+        let xml = list(&app, "/pot?list-type=2&start-after=b").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["c"]);
+        assert!(xml.contains("<StartAfter>b</StartAfter>"));
+    }
+
+    #[tokio::test]
+    async fn max_keys_over_the_ceiling_is_clamped_not_refused() {
+        let app = app(state());
+        put(&app, "/pot/a", b"x").await;
+        let xml = list(&app, "/pot?list-type=2&max-keys=99999").await;
+        assert!(xml.contains(&format!("<MaxKeys>{MAX_KEYS_LIMIT}</MaxKeys>")));
+    }
+
+    #[tokio::test]
+    async fn a_malformed_query_is_a_400_not_a_500() {
+        let app = app(state());
+        put(&app, "/pot/a", b"x").await;
+        for uri in [
+            "/pot?list-type=2&max-keys=lots",
+            "/pot?list-type=2&encoding-type=rot13",
+            // Not hex, so it was never a token we issued.
+            "/pot?list-type=2&continuation-token=zzz",
+        ] {
+            assert_eq!(status(&app, "GET", uri).await, StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn encoding_type_url_escapes_keys_xml_could_not_carry() {
+        let app = app(state());
+        put(&app, "/pot/a%20b.txt", b"x").await;
+        let xml = list(&app, "/pot?list-type=2&encoding-type=url").await;
+        assert!(xml.contains("<EncodingType>url</EncodingType>"));
+        // `/` is encoded too, per AWS's rules, which is what SDKs decode.
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["a%20b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_plus_in_a_prefix_stays_a_plus() {
+        let app = app(state());
+        put(&app, "/pot/holiday+2026/a", b"x").await;
+        put(&app, "/pot/other/b", b"x").await;
+        // Decoding `+` to a space here would match nothing at all.
+        let xml = list(&app, "/pot?list-type=2&prefix=holiday%2B2026%2F").await;
+        assert_eq!(all_between(&xml, "<Key>", "</Key>"), ["holiday+2026/a"]);
+    }
+
+    #[tokio::test]
+    async fn a_key_with_xml_punctuation_comes_back_escaped() {
+        let app = app(state());
+        // Escaped in the request URI because `<`/`>` aren't legal there either;
+        // the key that lands is the decoded `a&b<c>.txt`.
+        put(&app, "/pot/a%26b%3Cc%3E.txt", b"x").await;
+        let xml = list(&app, "/pot?list-type=2").await;
+        assert!(xml.contains("<Key>a&amp;b&lt;c&gt;.txt</Key>"), "{xml}");
+    }
+
     #[tokio::test]
     async fn object_id_header_is_consistent_across_write_paths_and_head() {
         let app = app(state());
