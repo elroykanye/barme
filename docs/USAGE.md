@@ -64,16 +64,41 @@ Roll back to an earlier version by its id:
 ## S3 API
 
 The S3 door handles object PUT, GET, DELETE, and HEAD with AWS SigV4, the
-multipart upload sequence, and bucket create/head/delete plus ListBuckets. Point
-any S3 client at http://localhost:9000 with path-style addressing.
+multipart upload sequence, object listing, and bucket create/head/delete plus
+ListBuckets. Point any S3 client at http://localhost:9000 with path-style
+addressing.
 
     aws configure set aws_access_key_id barme
     aws configure set aws_secret_access_key barme
     aws --endpoint-url http://localhost:9000 s3 mb s3://photos
     aws --endpoint-url http://localhost:9000 s3 cp photo.jpg s3://photos/cat.jpg
     aws --endpoint-url http://localhost:9000 s3 cp s3://photos/cat.jpg out.jpg
+    aws --endpoint-url http://localhost:9000 s3 ls s3://photos/ --recursive
 
-Object listing (`GET /{pot}`, S3 ListObjects) isn't on the S3 door yet; use the native `/pots/{pot}/objects` endpoint to list a pot's contents.
+### Listing objects
+
+`GET /{pot}?list-type=2` is ListObjectsV2, with `prefix`, `delimiter`,
+`max-keys`, `continuation-token`, `start-after` and `encoding-type`. A page holds
+at most 1000 keys, S3's own ceiling, and a larger `max-keys` is clamped rather
+than refused. Any SDK's paginator, and `aws s3 sync`, work as they do against S3:
+
+    # mirror a pot to a local directory
+    aws --endpoint-url http://localhost:9000 s3 sync s3://photos ./photos-backup
+
+A `delimiter` collapses each folder into a `CommonPrefixes` entry, which is what
+a browse-a-pot view pages through. A collapsed prefix counts as one key against
+`max-keys`, as it does in S3, and never repeats across pages however its keys
+fall relative to a page boundary.
+
+Each entry's `ETag` is the object's content id — the same `blake3:…` a `PUT` and
+a `HEAD` report in `X-Barme-Object-Id`, and the handle for a `/cdn/{hash}` link
+— so a mirroring tool can tell what it already has without downloading anything.
+Note that this differs from S3 for multipart objects, where an ETag is a
+digest-of-digests rather than a hash of the content.
+
+Only v2 is served; the v1 form (`GET /{pot}` with `marker`) answers 501. The
+native `/pots/{pot}/objects` endpoint also lists a pot, and additionally reports
+each key's version count.
 
 ## Config
 

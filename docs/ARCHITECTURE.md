@@ -179,8 +179,11 @@ The bucket/key/object model maps almost directly onto bucket/pointer/manifest.
 | `HEAD bucket/key` | read manifest; etag is the content hash; `X-Barme-Object-Id` carries the content id |
 | Multipart | each part is a batch of chunks; completion re-hashes and assembles one manifest |
 | `PUT/HEAD/DELETE bucket`, `GET /` | create / head / delete a pot; ListBuckets |
+| `GET bucket?list-type=2` | ListObjectsV2: page the pointer directory, then read only that page's manifests |
 
-Implemented as of v1.0: object `PUT/GET/DELETE/HEAD`, the full multipart sequence, and bucket create/head/delete plus ListBuckets, all with AWS SigV4. Not yet on the S3 door, tracked for 1.1: `ListObjects` (`GET bucket?list-type=2`), `?versionId` reads, and presigned query-string URLs — barme's own share links already cover time-limited delivery through the CDN door. The long tail of bucket sub-resources (ACLs, lifecycle, policies) comes later.
+Implemented as of v1.0: object `PUT/GET/DELETE/HEAD`, the full multipart sequence, and bucket create/head/delete plus ListBuckets, all with AWS SigV4. Added since: `ListObjectsV2` (#4), with prefix, delimiter, and continuation tokens. Not yet on the S3 door: `?versionId` reads, and presigned query-string URLs (#5) — barme's own share links already cover time-limited delivery through the CDN door. The long tail of bucket sub-resources (ACLs, lifecycle, policies) comes later.
+
+Listing pages on keys before touching a manifest, so a page costs one directory read plus at most `max-keys` manifest reads however large the pot is. Sorting the keys is what makes the delimiter cheap: a folder's keys are contiguous, so collapsing one is a scan rather than a grouping pass, and a cursor that points at the last key consumed can't re-emit a prefix it already returned.
 
 ### Native API
 
@@ -231,7 +234,7 @@ worked out here yet.
 
 Resolved since v1.0: the on-disk layout (sharded content-addressed directories under the data dir, versioned by `format.json`), GC scheduling (a configurable grace window and sweep interval), and the license (MIT). Still open:
 
-- S3 surface: the long tail (ACLs, lifecycle rules, bucket policies), plus `ListObjects` and presigned query-string auth (tracked for 1.1).
+- S3 surface: the long tail (ACLs, lifecycle rules, bucket policies), plus presigned query-string auth (#5). `ListObjectsV2` is done (#4); the v1 `marker` form is still an open question, and answers 501 meanwhile rather than returning a v2 body a v1 client would misread as an empty pot.
 - Pluggable storage backends for chunks (today: local disk only).
 - Embedding models per content type, and where inference runs (the semantic layer is experimental).
 - Cross-node durability — erasure coding vs. replication — folded into the [Distribution (v2)](#distribution-v2) work.

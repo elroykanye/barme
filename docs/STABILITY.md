@@ -36,9 +36,11 @@ Frozen as the v1 contract:
 - **Pots** — `/pots` and its sub-resources (`rename`, `visibility`, `config`,
   `objects`, `import`, `zip`), `/ops/copy`, `/ops/move`
 - **Access keys** — `/keys`
-- **S3 door** — object PUT/GET/DELETE/HEAD, the multipart sequence, and bucket
-  create/head/delete plus ListBuckets, AWS SigV4. (The S3 wire contract is AWS's;
-  barme tracks it.)
+- **S3 door** — object PUT/GET/DELETE/HEAD, the multipart sequence, ListObjectsV2,
+  and bucket create/head/delete plus ListBuckets, AWS SigV4. (The S3 wire contract
+  is AWS's; barme tracks it.) The continuation token is deliberately *not* part of
+  the contract: it's opaque by S3's own definition, so its encoding can change
+  between releases. Don't store one across a restart or an upgrade.
 - **CDN door** — `/cdn/{hash}`, `/public/{pot}/{key}`, `/s/...` (presigned share).
   Note: `/cdn/{hash}` caches permanently and can't be revoked, so it's for public,
   non-erasable content only — serve erasable/personal data over `/s/` (see
