@@ -880,6 +880,15 @@ mod tests {
         }
     }
 
+    fn state_with_auth() -> S3State {
+        let state = state();
+        state.engine.ensure_owner(
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        ).unwrap();
+        state
+    }
+
     /// Extract the text between two markers, for reading ids out of XML in tests.
     fn between(haystack: &str, open: &str, close: &str) -> String {
         let start = haystack.find(open).expect("open marker") + open.len();
@@ -924,6 +933,40 @@ mod tests {
         );
         let got = res.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&got[..], &body[..]);
+    }
+
+    #[tokio::test]
+    async fn botocore_presigned_get_downloads_a_private_object() {
+        let state = state_with_auth();
+        let body = b"downloaded through a standard SDK presign";
+        state
+            .engine
+            .put("photos", "cat.txt", body, "text/plain")
+            .unwrap();
+        let query = concat!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
+            "X-Amz-Credential=AKIDEXAMPLE%2F20260817%2Fus-east-1%2Fs3%2Faws4_request&",
+            "X-Amz-Date=20260817T120000Z&",
+            "X-Amz-Expires=900&",
+            "X-Amz-SignedHeaders=host&",
+            "X-Amz-Signature=66b10d4b3e938da23092182bff453f832540bd89f9e6e64324ca5927167faba2",
+        );
+
+        let res = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/photos/cat.txt?{query}"))
+                    .header(header::HOST, "barme.local")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let got = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&got[..], body);
     }
 
     #[tokio::test]
