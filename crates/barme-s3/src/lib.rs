@@ -970,6 +970,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn botocore_presigned_put_uploads_a_private_object() {
+        let state = state_with_auth();
+        let body = b"uploaded through a standard SDK presign";
+        let query = concat!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
+            "X-Amz-Credential=AKIDEXAMPLE%2F20260817%2Fus-east-1%2Fs3%2Faws4_request&",
+            "X-Amz-Date=20260817T120000Z&",
+            "X-Amz-Expires=900&",
+            "X-Amz-SignedHeaders=content-type%3Bhost&",
+            "X-Amz-Signature=eb3747b421e5a221d671ae16e1143a528904d31a51540ada30dd739138e464fd",
+        );
+
+        let res = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/photos/upload.txt?{query}"))
+                    .header(header::HOST, "barme.local")
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from(&body[..]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let stored = state.engine.get("photos", "upload.txt").unwrap().unwrap();
+        assert_eq!(&stored[..], body);
+    }
+
+    #[tokio::test]
     async fn get_unknown_key_is_404() {
         let app = app(state());
         let res = app
