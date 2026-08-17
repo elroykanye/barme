@@ -60,8 +60,7 @@ fn verify_sigv4_at(
         (parsed, req.query.clone(), amz_date.to_string(), payload_hash.to_string())
     } else if query_param(&req.query, "X-Amz-Algorithm").is_some() {
         let parsed = ParsedAuth::parse_query(&req.query)?;
-        let amz_date = query_param(&req.query, "X-Amz-Date")
-            .ok_or(AuthError::MalformedHeader)?;
+        let amz_date = required_query_param(&req.query, "X-Amz-Date")?;
         ensure_presign_not_expired(&req.query, &amz_date, now_unix)?;
         (
             parsed,
@@ -101,8 +100,7 @@ fn ensure_presign_not_expired(
     amz_date: &str,
     now_unix: i64,
 ) -> Result<(), AuthError> {
-    let expires: i64 = query_param(query, "X-Amz-Expires")
-        .ok_or(AuthError::MalformedHeader)?
+    let expires: i64 = required_query_param(query, "X-Amz-Expires")?
         .parse()
         .map_err(|_| AuthError::MalformedHeader)?;
     if !(0..=604_800).contains(&expires) {
@@ -116,7 +114,9 @@ fn ensure_presign_not_expired(
         .map_err(|_| AuthError::MalformedHeader)?
         .assume_utc()
         .unix_timestamp();
-    if now_unix > issued.saturating_add(expires) {
+    if issued > now_unix.saturating_add(900)
+        || now_unix > issued.saturating_add(expires)
+    {
         return Err(AuthError::SignatureMismatch);
     }
     Ok(())
@@ -162,13 +162,12 @@ impl ParsedAuth {
     }
 
     fn parse_query(query: &str) -> Result<Self, AuthError> {
-        if query_param(query, "X-Amz-Algorithm").as_deref() != Some("AWS4-HMAC-SHA256") {
+        if required_query_param(query, "X-Amz-Algorithm")?.as_str() != "AWS4-HMAC-SHA256" {
             return Err(AuthError::MalformedHeader);
         }
-        let credential = query_param(query, "X-Amz-Credential").ok_or(AuthError::MalformedHeader)?;
-        let signed_headers =
-            query_param(query, "X-Amz-SignedHeaders").ok_or(AuthError::MalformedHeader)?;
-        let signature = query_param(query, "X-Amz-Signature").ok_or(AuthError::MalformedHeader)?;
+        let credential = required_query_param(query, "X-Amz-Credential")?;
+        let signed_headers = required_query_param(query, "X-Amz-SignedHeaders")?;
+        let signature = required_query_param(query, "X-Amz-Signature")?;
         let (access_key, scope) = credential
             .split_once('/')
             .ok_or(AuthError::MalformedHeader)?;
@@ -187,6 +186,18 @@ fn query_param(raw: &str, wanted: &str) -> Option<String> {
         let (key, value) = part.split_once('=').unwrap_or((part, ""));
         (percent_decode(key) == wanted).then(|| percent_decode(value))
     })
+}
+
+fn required_query_param(raw: &str, wanted: &str) -> Result<String, AuthError> {
+    let mut matches = raw.split('&').filter(|part| !part.is_empty()).filter_map(|part| {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        (percent_decode(key) == wanted).then(|| percent_decode(value))
+    });
+    let value = matches.next().ok_or(AuthError::MalformedHeader)?;
+    if matches.next().is_some() {
+        return Err(AuthError::SignatureMismatch);
+    }
+    Ok(value)
 }
 
 fn query_without_signature(raw: &str) -> String {
@@ -458,7 +469,12 @@ mod tests {
             + "X-Amz-Signature=".len();
         signature.query.replace_range(cut.., &"0".repeat(64));
 
-        for request in [&path, &header, &query, &signature] {
+        let mut duplicate_signature = botocore_presigned_get();
+        duplicate_signature
+            .query
+            .push_str(&format!("&X-Amz-Signature={}", "0".repeat(64)));
+
+        for request in [&path, &header, &query, &signature, &duplicate_signature] {
             assert!(matches!(
                 verify_sigv4_at(&creds(), request, 1_786_968_840),
                 Err(AuthError::SignatureMismatch)
@@ -485,6 +501,12 @@ mod tests {
         };
 
         assert!(verify_sigv4_at(&creds(), &req, 1_577_934_306).is_err());
+    }
+
+    #[test]
+    fn rejects_a_presign_more_than_fifteen_minutes_in_the_future() {
+        let req = botocore_presigned_get();
+        assert!(verify_sigv4_at(&creds(), &req, 1_786_967_099).is_err());
     }
 
     #[test]

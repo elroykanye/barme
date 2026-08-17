@@ -865,7 +865,9 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use hmac::{Hmac, Mac};
     use http_body_util::BodyExt;
+    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
 
     // Open-mode state (no credentials), so these tests exercise the routes, not
@@ -887,6 +889,68 @@ mod tests {
             "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
         ).unwrap();
         state
+    }
+
+    fn presigned_query(
+        method: &str,
+        path: &str,
+        signed_headers: &[(&str, &str)],
+    ) -> String {
+        type HmacSha256 = Hmac<Sha256>;
+
+        fn hmac(key: &[u8], value: &str) -> Vec<u8> {
+            let mut mac = HmacSha256::new_from_slice(key).unwrap();
+            mac.update(value.as_bytes());
+            mac.finalize().into_bytes().to_vec()
+        }
+
+        let now = time::OffsetDateTime::now_utc();
+        let date_format = time::format_description::parse_borrowed::<2>(
+            "[year][month][day]T[hour][minute][second]Z",
+        )
+        .unwrap();
+        let amz_date = now.format(&date_format).unwrap();
+        let date_stamp = &amz_date[..8];
+        let scope = format!("{date_stamp}/us-east-1/s3/aws4_request");
+        let signed = signed_headers
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(";");
+        let mut params = vec![
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+            (
+                "X-Amz-Credential",
+                format!("AKIDEXAMPLE/{scope}"),
+            ),
+            ("X-Amz-Date", amz_date.clone()),
+            ("X-Amz-Expires", "300".to_string()),
+            ("X-Amz-SignedHeaders", signed.clone()),
+        ];
+        params.sort_by(|a, b| a.0.cmp(b.0));
+        let query = params
+            .iter()
+            .map(|(key, value)| format!("{}={}", uri_encode(key), uri_encode(value)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let canonical_headers = signed_headers
+            .iter()
+            .map(|(name, value)| format!("{name}:{value}\n"))
+            .collect::<String>();
+        let canonical_request = format!(
+            "{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\nUNSIGNED-PAYLOAD",
+        );
+        let request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{request_hash}");
+        let k_date = hmac(
+            format!("AWS4{}", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").as_bytes(),
+            date_stamp,
+        );
+        let k_region = hmac(&k_date, "us-east-1");
+        let k_service = hmac(&k_region, "s3");
+        let k_signing = hmac(&k_service, "aws4_request");
+        format!("{query}&X-Amz-Signature={}", hex::encode(hmac(&k_signing, &string_to_sign)))
     }
 
     /// Extract the text between two markers, for reading ids out of XML in tests.
@@ -936,21 +1000,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn botocore_presigned_get_downloads_a_private_object() {
+    async fn presigned_get_downloads_a_private_object() {
         let state = state_with_auth();
         let body = b"downloaded through a standard SDK presign";
         state
             .engine
             .put("photos", "cat.txt", body, "text/plain")
             .unwrap();
-        let query = concat!(
-            "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
-            "X-Amz-Credential=AKIDEXAMPLE%2F20990101%2Fus-east-1%2Fs3%2Faws4_request&",
-            "X-Amz-Date=20990101T000000Z&",
-            "X-Amz-Expires=604800&",
-            "X-Amz-SignedHeaders=host&",
-            "X-Amz-Signature=eaa26867c4429fa8ea3b863e819e74ae45038f9af728d66eaeb981de9182be51",
-        );
+        let query = presigned_query("GET", "/photos/cat.txt", &[("host", "barme.local")]);
 
         let res = app(state)
             .oneshot(
@@ -970,16 +1027,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn botocore_presigned_put_uploads_a_private_object() {
+    async fn presigned_put_uploads_a_private_object() {
         let state = state_with_auth();
         let body = b"uploaded through a standard SDK presign";
-        let query = concat!(
-            "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
-            "X-Amz-Credential=AKIDEXAMPLE%2F20990101%2Fus-east-1%2Fs3%2Faws4_request&",
-            "X-Amz-Date=20990101T000000Z&",
-            "X-Amz-Expires=604800&",
-            "X-Amz-SignedHeaders=content-type%3Bhost&",
-            "X-Amz-Signature=76b53adefa4c7a7d7cceb630d2ad7741a589cd0bf2850a96fcf4f42a265e2022",
+        let query = presigned_query(
+            "PUT",
+            "/photos/upload.txt",
+            &[("content-type", "text/plain"), ("host", "barme.local")],
         );
 
         let res = app(state.clone())
