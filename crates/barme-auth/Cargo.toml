@@ -10,3 +10,4 @@ sha2.workspace = true
 hmac = "0.12"
 hex.workspace = true
 thiserror.workspace = true
+time = { workspace = true, features = ["parsing"] }

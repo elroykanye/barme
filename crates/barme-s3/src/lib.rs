@@ -945,11 +945,11 @@ mod tests {
             .unwrap();
         let query = concat!(
             "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
-            "X-Amz-Credential=AKIDEXAMPLE%2F20260817%2Fus-east-1%2Fs3%2Faws4_request&",
-            "X-Amz-Date=20260817T120000Z&",
-            "X-Amz-Expires=900&",
+            "X-Amz-Credential=AKIDEXAMPLE%2F20990101%2Fus-east-1%2Fs3%2Faws4_request&",
+            "X-Amz-Date=20990101T000000Z&",
+            "X-Amz-Expires=604800&",
             "X-Amz-SignedHeaders=host&",
-            "X-Amz-Signature=66b10d4b3e938da23092182bff453f832540bd89f9e6e64324ca5927167faba2",
+            "X-Amz-Signature=eaa26867c4429fa8ea3b863e819e74ae45038f9af728d66eaeb981de9182be51",
         );
 
         let res = app(state)
@@ -975,11 +975,11 @@ mod tests {
         let body = b"uploaded through a standard SDK presign";
         let query = concat!(
             "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
-            "X-Amz-Credential=AKIDEXAMPLE%2F20260817%2Fus-east-1%2Fs3%2Faws4_request&",
-            "X-Amz-Date=20260817T120000Z&",
-            "X-Amz-Expires=900&",
+            "X-Amz-Credential=AKIDEXAMPLE%2F20990101%2Fus-east-1%2Fs3%2Faws4_request&",
+            "X-Amz-Date=20990101T000000Z&",
+            "X-Amz-Expires=604800&",
             "X-Amz-SignedHeaders=content-type%3Bhost&",
-            "X-Amz-Signature=eb3747b421e5a221d671ae16e1143a528904d31a51540ada30dd739138e464fd",
+            "X-Amz-Signature=76b53adefa4c7a7d7cceb630d2ad7741a589cd0bf2850a96fcf4f42a265e2022",
         );
 
         let res = app(state.clone())

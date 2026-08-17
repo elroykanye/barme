@@ -12,6 +12,8 @@ use crate::{AuthError, Credentials, Principal};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+use time::PrimitiveDateTime;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -35,6 +37,18 @@ impl SignedRequest {
 /// then decides whether that's allowed). A present but invalid signature is an
 /// error.
 pub fn verify_sigv4(creds: &Credentials, req: &SignedRequest) -> Result<Principal, AuthError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AuthError::MalformedHeader)?
+        .as_secs() as i64;
+    verify_sigv4_at(creds, req, now)
+}
+
+fn verify_sigv4_at(
+    creds: &Credentials,
+    req: &SignedRequest,
+    now_unix: i64,
+) -> Result<Principal, AuthError> {
     let (parsed, query, amz_date, payload_hash) = if let Some(auth) = req.header("authorization") {
         let parsed = ParsedAuth::parse(auth)?;
         let amz_date = req
@@ -48,6 +62,7 @@ pub fn verify_sigv4(creds: &Credentials, req: &SignedRequest) -> Result<Principa
         let parsed = ParsedAuth::parse_query(&req.query)?;
         let amz_date = query_param(&req.query, "X-Amz-Date")
             .ok_or(AuthError::MalformedHeader)?;
+        ensure_presign_not_expired(&req.query, &amz_date, now_unix)?;
         (
             parsed,
             query_without_signature(&req.query),
@@ -79,6 +94,32 @@ pub fn verify_sigv4(creds: &Credentials, req: &SignedRequest) -> Result<Principa
     } else {
         Err(AuthError::SignatureMismatch)
     }
+}
+
+fn ensure_presign_not_expired(
+    query: &str,
+    amz_date: &str,
+    now_unix: i64,
+) -> Result<(), AuthError> {
+    let expires: i64 = query_param(query, "X-Amz-Expires")
+        .ok_or(AuthError::MalformedHeader)?
+        .parse()
+        .map_err(|_| AuthError::MalformedHeader)?;
+    if !(0..=604_800).contains(&expires) {
+        return Err(AuthError::MalformedHeader);
+    }
+    let format = time::format_description::parse_borrowed::<2>(
+        "[year][month][day]T[hour][minute][second]Z",
+    )
+    .map_err(|_| AuthError::MalformedHeader)?;
+    let issued = PrimitiveDateTime::parse(amz_date, &format)
+        .map_err(|_| AuthError::MalformedHeader)?
+        .assume_utc()
+        .unix_timestamp();
+    if now_unix > issued.saturating_add(expires) {
+        return Err(AuthError::SignatureMismatch);
+    }
+    Ok(())
 }
 
 struct ParsedAuth {
@@ -394,9 +435,30 @@ mod tests {
         };
 
         assert_eq!(
-            verify_sigv4(&creds(), &req).unwrap(),
+            verify_sigv4_at(&creds(), &req, 1_786_968_840).unwrap(),
             Principal::Owner(ACCESS.into())
         );
+    }
+
+    #[test]
+    fn rejects_an_expired_botocore_presign() {
+        // A valid boto3 URL issued at 2020-01-02T03:04:05Z for 60 seconds.
+        let query = concat!(
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&",
+            "X-Amz-Credential=AKIDEXAMPLE%2F20200102%2Fus-east-1%2Fs3%2Faws4_request&",
+            "X-Amz-Date=20200102T030405Z&",
+            "X-Amz-Expires=60&",
+            "X-Amz-SignedHeaders=host&",
+            "X-Amz-Signature=4175aa5da874e0160a416b283466fc94945bab90dfdd2630b2af343f8c52da32",
+        );
+        let req = SignedRequest {
+            method: "GET".into(),
+            path: "/photos/expired.txt".into(),
+            query: query.into(),
+            headers: HashMap::from([("host".into(), "barme.local".into())]),
+        };
+
+        assert!(verify_sigv4_at(&creds(), &req, 1_577_934_306).is_err());
     }
 
     #[test]
