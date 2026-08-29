@@ -75,6 +75,17 @@ addressing.
     aws --endpoint-url http://localhost:9000 s3 cp s3://photos/cat.jpg out.jpg
     aws --endpoint-url http://localhost:9000 s3 ls s3://photos/ --recursive
 
+### Presigned URLs
+
+The S3 door accepts standard SigV4 query-string presigned URLs for GET and PUT.
+This lets a backend give a browser or another client short-lived direct access
+without exposing the access-key secret. The signature covers the path, every
+signed header, and the query parameters; barme rejects altered or expired URLs.
+
+Generate the URL with an S3 SDK configured for path-style addressing and the
+barme endpoint. For a runnable boto3 example that uploads and downloads through
+presigned URLs, see `scripts/s3_presign.py`.
+
 ### Listing objects
 
 `GET /{pot}?list-type=2` is ListObjectsV2, with `prefix`, `delimiter`,

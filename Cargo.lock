@@ -207,6 +207,7 @@ dependencies = [
  "hmac",
  "sha2 0.10.9",
  "thiserror",
+ "time",
 ]
 
 [[package]]
@@ -323,7 +324,9 @@ dependencies = [
  "barme-engine",
  "futures-util",
  "hex",
+ "hmac",
  "http-body-util",
+ "sha2 0.10.9",
  "tempfile",
  "time",
  "tokio",
